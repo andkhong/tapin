@@ -1,365 +1,244 @@
-# Cooper
+# Tap In
 
-**Verified handoffs for AI coding work.**
+**Hand off unfinished AI coding work to another agent, right where it stopped.**
 
-Cooper lets you switch between Claude Code, Codex, Cursor, and other coding agents without losing the state of an unfinished task.
+Tap In lets you move a task between Claude Code, Codex, Cursor and other coding agents without starting over. When an agent hits its usage limit, Tap In captures the work in the background and notifies you. The next agent you open in that folder starts with the task history, the plan, the commands that were run and the exact workspace diff.
 
-When an agent stops—because it reaches a limit, loses context, crashes, or you simply want a different model—Cooper creates a **verified checkpoint** of the work. The next agent receives a compact handoff with the task, workspace state, decisions, validation results, and next steps, then verifies that the repository still matches before editing.
+Tap In never asks the stopped agent to summarize its own work. A rate-limited agent can't respond, so the handoff is built from what is already on disk.
 
-Cooper does not just summarize a chat.
+## Why Tap In?
 
-It preserves the evidence another agent needs to safely continue:
+Coding agents are easy to interrupt. You hit a usage limit mid-task, want a second opinion from another model, move from a terminal agent to an IDE, or restart after a crash. Each time, the next agent has to rediscover the work:
 
-- The task objective and acceptance criteria
-- Git branch, commit, worktree status, and workspace diff
-- Changed, staged, and untracked files
-- Commands run, including exit codes and relevant output
-- Tests, lint, build, and validation results
-- Decisions, open questions, blocked work, and recommended next actions
-- A compact prompt tailored for the receiving agent
-
-```text
-Claude Code stopped halfway through a task.
-        ↓
-Cooper creates a checkpoint from the session and workspace.
-        ↓
-You start Codex, Cursor, or another agent.
-        ↓
-The new agent verifies the checkpoint and continues.
-```
-
-## Why Cooper?
-
-Coding agents are powerful, but their work is easy to interrupt.
-
-You may hit a usage limit, switch models for a second opinion, move from a terminal agent to an IDE, restart after a crash, or hand a task to a teammate. In each case, the next agent usually has to rediscover the work:
-
-- What was the original goal?
-- Which files changed?
+- What was the goal?
+- Which files changed, and which step was half done?
 - What was already tried?
-- Which tests passed or failed?
-- What decisions were made?
-- What should happen next?
-- Is the repository still in the state the previous agent described?
+- Which commands failed?
+- What was the plan?
 
-Copying a transcript is noisy. Asking the previous agent for a summary is unreliable. A generic `AGENTS.md` or `CLAUDE.md` explains project conventions, but not the exact state of the task you were working on.
+Copying a transcript is noisy. Asking the previous agent for a summary is unreliable, and impossible once it's rate-limited. `AGENTS.md` and `CLAUDE.md` describe how the project works, not where this task stands.
 
-Cooper captures the current work as a structured checkpoint so the next agent can start from evidence instead of guesswork.
+Other tools can convert or summarize a session when you ask. Tap In adds what they don't: it **captures the handoff the moment the limit hits**, and **loads it into the next agent automatically** when that agent starts.
 
-## What Cooper captures
+## How it works
 
-A Cooper checkpoint separates **verified facts** from agent-generated interpretation.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/flow-dark.svg">
+  <img alt="When Claude Code hits its usage limit, its hook starts tapin capture, which turns the session log, working tree and plan into a handoff in .tapin/. You start Codex, which claims the handoff and picks up mid-step." src="docs/images/flow-light.svg">
+</picture>
 
-| Checkpoint data | Source | Examples |
-|---|---|---|
-| Workspace state | Git and filesystem | Branch, commit, diff, staged files, untracked files |
-| Validation results | Command execution | Test, lint, type-check, build, and command exit status |
-| Session context | Agent history | Goal, plan, decisions, failed approaches, open questions |
-| Next actions | Agent session and checkpoint analysis | Suggested files to inspect, commands to run, remaining work |
-| Safety information | Cooper checks | Redacted secrets, stale state, conflicts, missing tools |
+1. **An agent stops on its limit.** Its hook starts `tapin capture` in a background process, so the agent isn't held up.
+2. **Tap In writes a handoff.** It reads the session log, snapshots git and copies the plan into `.tapin/handoffs/<id>/handoff.md`, marks it as waiting, and shows a macOS notification.
+3. **You start the next agent.** Run `tapin to codex`, or just open Codex in the same folder. Its session-start hook finds the waiting handoff, claims it so no other session picks it up, and tells Codex to read it before doing anything else.
 
-This distinction matters: a prior agent’s summary may be wrong, stale, or incomplete. Git state and command results are evidence. Cooper gives the receiving agent both, so it can verify the handoff before continuing.
+## What a handoff contains
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/handoff-dark.svg">
+  <img alt="Each section of handoff.md is filled from something already on disk: the hook payload, Tap In's instructions, checkpoint notes, the plan file, the session log and git." src="docs/images/handoff-light.svg">
+</picture>
+
+A handoff mixes evidence with the previous agent's own account. The git status and diff show the real state of the repository. The last message and the conversation show what the agent believed it had done. The handoff tells the next agent to treat those statements as unverified, and to check the workspace before editing.
+
+The diff and the session digest are each capped at 60,000 characters, and common secret formats are redacted before the file is written.
 
 ## Install
 
-Cooper requires Python 3.13+, [uv](https://docs.astral.sh/uv/), and Node.js for `npx continues`.
+Tap In requires Python 3.13+, [uv](https://docs.astral.sh/uv/), and Node.js (for `npx continues`).
 
 ```sh
 uv tool install --editable .
-cooper install
-cooper doctor
+tapin install
+tapin doctor
 ```
 
-`cooper install` configures supported agents and installs the Cooper MCP server.
-
-To configure only selected agents:
+`tapin install` adds Tap In's hooks to Claude Code, Codex and Cursor, and registers the Tap In MCP server with each.
 
 ```sh
-cooper install --agents claude,codex
+tapin install --agents claude,codex   # configure only some agents
+tapin install --no-mcp                # hooks only
+tapin install --instructions          # also add a short Tap In section to ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md
 ```
 
-To also add short Cooper usage instructions to Claude Code and Codex configuration files:
+Every config file Tap In changes is backed up first as `<file>.tapin-backup-<timestamp>`.
 
-```sh
-cooper install --instructions
-```
+**Codex only runs hooks you trust.** Open Codex, run `/hooks`, and check that the Tap In `SessionStart` and `Stop` entries are active.
 
-Every configuration file Cooper changes is backed up first:
-
-```text
-<file>.cooper-backup-<timestamp>
-```
-
-Codex only runs hooks you explicitly trust. Open Codex, run `/hooks`, and trust the Cooper entries.
-
-To remove Cooper’s configuration:
-
-```sh
-cooper uninstall
-```
+To remove everything: `tapin uninstall`.
 
 ## Quick start
 
-Create a checkpoint when you want to switch agents, recover from an interruption, or preserve the current state of a task.
+When an agent hits its limit, you'll get a notification. In that project folder, either run:
 
 ```sh
-# Capture the most recent agent session and current workspace state.
-cooper checkpoint
-
-# Start Codex with the newest checkpoint.
-cooper resume codex
-
-# Start Claude Code with the newest checkpoint.
-cooper resume claude
-
-# Start Cursor with the newest checkpoint.
-cooper resume cursor
+tapin to codex
 ```
 
-Before the next agent edits code, verify that the current repository still matches the checkpoint:
+or open Codex there yourself. Either way, Codex starts with the handoff.
+
+You can also hand off at any time, without waiting for a limit:
 
 ```sh
-cooper verify
+tapin to claude              # hand the newest non-Claude session here to Claude Code and launch it
+tapin to cursor --from codex # choose which agent's session to hand off
+tapin capture                # just write a handoff; the next agent you open picks it up
+tapin status                 # show the waiting handoff and recent ones
 ```
 
-A typical result looks like this:
+`tapin status` looks like this:
 
 ```text
-Checkpoint: valid with 1 warning
-
-✓ Repository matches checkpoint
-✓ Branch and commit match
-✓ Workspace diff matches
-✓ Expected changed files exist
-✓ Latest failing test reproduced
-! Docker is unavailable; service-state checks were skipped
-
-Task:
-  Fix retry behavior for failed payment webhooks
-
-Next suggested action:
-  Inspect retry-state serialization in src/webhooks/events.py
+Workspace: /Users/you/projects/pipeline
+Pending:   20260912T222249Z-codex from codex (waiting until 2026-09-13T10:22:49Z)
+  20260912T222249Z-codex  usage_limit  /Users/you/projects/pipeline/.tapin/handoffs/20260912T222249Z-codex/handoff.md
 ```
 
 ## Common workflows
 
-### Recover after an agent stops
+### Continue after a usage limit
 
-If Claude Code, Codex, or Cursor stops unexpectedly, Cooper can capture the latest session and workspace state.
+Capture is automatic when:
 
-```sh
-cooper capture
-cooper resume codex
-```
+- **Claude Code** stops with a `rate_limit` error (add others, such as `overloaded`, with `limit_errors`)
+- **Codex** ends a turn on a usage-limit error
+- **Cursor** stops with an error
 
-This is useful after:
+Then run `tapin to <agent>`, or open the next agent in the folder.
 
-- Usage or rate limits
-- Context-window exhaustion
-- Provider overloads
-- Terminal or IDE crashes
-- A laptop restart
-- An interrupted long-running task
+### Recover after a crash, restart or full context window
 
-### Intentionally switch models
-
-You do not need to wait for a failure.
-
-Use Cooper when you want to:
-
-- Ask another model to implement an existing plan
-- Move from planning to execution
-- Switch to a cheaper or faster model for straightforward changes
-- Get a second agent to debug or review a partial implementation
-- Move between terminal and IDE workflows
+These don't trigger automatic capture. `tapin to` reads the session logs directly, so it works anyway:
 
 ```sh
-cooper checkpoint
-cooper resume cursor
+tapin to codex --from claude
 ```
 
-### Continue without launching an agent
+### Switch agents on purpose
 
-Print the receiving-agent command and copy the prepared handoff prompt manually:
+Hand a plan to a different model to implement, get a second agent to debug a partial change, or move from the terminal to your IDE:
 
 ```sh
-cooper resume codex --print
+tapin to cursor --from claude
 ```
 
-This is useful for Codex Desktop, Cursor IDE, remote development environments, or any workflow where Cooper cannot directly launch the target agent.
+### Hand off to a desktop app
 
-### Inspect recent work
+Tap In can't start Codex Desktop or the Cursor IDE with a prompt, so for those:
 
 ```sh
-cooper status
+tapin to codex --print
 ```
 
-This shows the current pending checkpoint and recent handoffs.
+This writes the handoff, copies the prompt to your clipboard, and leaves the handoff waiting. Open the app in the project folder and start a new chat; its session-start hook loads the handoff.
 
-## How verification works
+If Cursor's terminal agent isn't installed, `tapin to cursor` opens the Cursor IDE the same way.
 
-A handoff should not be trusted blindly.
+### Only one session picks it up
 
-Between the time one agent stops and another starts, the repository may change. You may switch branches, edit files manually, pull remote changes, run a formatter, or have another agent working in the same directory.
-
-`cooper verify` compares the current workspace against the checkpoint before the receiving agent continues.
-
-It can verify:
-
-- Repository root, Git branch, and current commit
-- Staged, unstaged, and untracked changes
-- File paths and expected hashes
-- Patch and diff compatibility
-- Whether required files still exist
-- Relevant test, lint, build, or command outcomes
-- Whether the checkpoint is stale or superseded
-- Conflicts caused by another agent or developer changing the workspace
-
-When the workspace no longer matches, Cooper reports the mismatch instead of silently presenting stale context as current.
-
-## Handoff artifacts
-
-Cooper stores checkpoints in the repository’s `.cooper/` directory.
-
-```text
-.cooper/
-  handoffs/
-    2026-09-12T154500Z-<id>/
-      HANDOFF.md
-      manifest.json
-      git-state.json
-      diff.patch
-      transcript-summary.md
-      commands.jsonl
-      validation.json
-      files.json
-```
-
-`.cooper/` is excluded from Git automatically.
-
-Each handoff includes:
-
-- `HANDOFF.md` — A concise, human- and agent-readable task brief
-- `manifest.json` — Checkpoint metadata and schema version
-- `git-state.json` — Branch, commit, worktree, and file-state evidence
-- `diff.patch` — The captured workspace patch
-- `transcript-summary.md` — Relevant session context and decisions
-- `commands.jsonl` — Commands run, timestamps, output references, and exit codes
-- `validation.json` — Test, lint, build, and verification results
-- `files.json` — Relevant files and integrity metadata
-
-The files are designed to be inspectable, portable, and usable without a specific AI vendor.
+The first new session to start in the folder claims the handoff, and later sessions don't see it again. Run `tapin capture` to write a fresh one. A handoff that nobody claims stops being offered after 12 hours.
 
 ## Supported agents
 
-Cooper currently supports:
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/agents-dark.svg">
+  <img alt="Agents never talk to each other directly. Claude Code, Codex, Cursor and any MCP agent each write a handoff to the project's .tapin/ folder when they stop and load one from it when they start." src="docs/images/agents-light.svg">
+</picture>
 
-- Claude Code
-- OpenAI Codex
-- Cursor
+Agents never talk to each other directly. Each one writes to and reads from the project's `.tapin/` folder, so supporting another agent means adding one adapter rather than a bridge to every other agent.
 
-Cooper reads session logs using [`continues`](https://github.com/yigitkonur/cli-continues) for Claude Code and Codex. Cursor activity is captured through Cooper’s Cursor hooks.
+- **Claude Code** and **Codex** (CLI and Desktop): session logs are read by [`continues`](https://github.com/yigitkonur/cli-continues).
+- **Cursor**: its chats aren't readable from disk, so Tap In's own Cursor hooks record prompts, responses, file edits and shell commands as they happen.
 
-Agents without a dedicated adapter can use either:
+### MCP and other agents
 
-- Cooper’s MCP server
-- The portable file-based handoff protocol
+Any agent that supports MCP can use the Tap In MCP server, with or without an adapter:
 
-## MCP and custom agents
+| Tool | What it does |
+|---|---|
+| `handoff_status` | Shows whether a handoff is waiting in this workspace |
+| `get_handoff` | Reads a handoff without claiming it |
+| `claim_handoff` | Claims the waiting handoff so no other session takes it |
+| `checkpoint` | Records progress, decisions and next steps; the latest one is included in the next handoff |
+| `create_handoff` | Writes a handoff now, e.g. before an agent knows it will stop |
 
-Cooper exposes a local MCP server for agents and tools that can work with structured handoffs.
+Agents without MCP can use the plain file format described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-Available operations include:
-
-- `checkpoint`
-- `create_handoff`
-- `claim_handoff`
-- `verify_handoff`
-- `list_handoffs`
-
-This allows custom agents to create, inspect, validate, and claim Cooper checkpoints without relying on a vendor-specific adapter.
-
-For non-MCP integrations, see the file protocol:
+## Handoff files
 
 ```text
-docs/PROTOCOL.md
+.tapin/
+  pending.json                    the handoff waiting to be picked up
+  handoffs/
+    20260912T222249Z-codex/
+      handoff.md                  what the next agent reads
+      meta.json                   stop details: agent, session, reason, git branch and HEAD
+  notes.md                        checkpoints written through MCP
+  journal/                        Cursor activity recorded by hooks
 ```
+
+`.tapin/` is added to `.git/info/exclude`, so it never shows up in `git status` or gets committed, and your `.gitignore` is left alone.
 
 ## Privacy and security
 
-Cooper is local-first.
+Tap In is local-only. Handoffs are written to your repository's `.tapin/` folder, there is no account, and session data is never sent anywhere. The only network access is `npx` downloading `continues` from npm the first time it runs.
 
-By default, checkpoints are stored in your repository under `.cooper/`. Cooper does not require a hosted account or send session data to a remote service.
+Before writing a handoff, Tap In redacts common secret formats: Anthropic and OpenAI API keys, GitHub tokens, AWS access key IDs, Google API keys, Slack tokens and bearer headers. That is a safety net, not a guarantee.
 
-Because coding-agent transcripts and terminal output can contain sensitive information, review your checkpoints before sharing them outside your machine or repository.
-
-Cooper is designed to support:
-
-- Local-only storage
-- Configurable checkpoint retention
-- Redaction of sensitive values
-- Explicit artifact inspection
-- Repository-scoped handoffs
-- Portable files you can audit and delete
-
-Do not treat a checkpoint as safe to share automatically. It can contain proprietary code, file paths, command output, implementation details, or session-derived context.
+A handoff can still contain proprietary code, file paths, command output and anything said in the session. Don't share one without reading it. Handoffs are never deleted automatically; remove `.tapin/handoffs/` when you no longer need them.
 
 ## Configuration
 
-User-level configuration lives in:
-
-```text
-~/.cooper/config.toml
-```
-
-It overrides defaults in `src/cooper/config.py`.
-
-Example:
+`~/.tapin/config.toml` overrides the defaults in [`src/tapin/config.py`](src/tapin/config.py):
 
 ```toml
-handoff_ttl_hours = 24
-limit_errors = ["rate_limit", "overloaded"]
+handoff_ttl_hours = 24                          # how long a handoff waits to be claimed (default 12)
+limit_errors = ["rate_limit", "overloaded"]     # Claude Code errors that trigger capture
 
 [agents.codex]
 command = ["/Applications/ChatGPT.app/Contents/Resources/codex"]
 ```
 
-You can configure:
+| Key | Default | Controls |
+|---|---|---|
+| `handoff_ttl_hours` | `12` | How long an unclaimed handoff is offered to new sessions |
+| `limit_errors` | `["rate_limit"]` | Claude Code `StopFailure` errors that trigger capture |
+| `limit_message_pattern` | usage/rate limit, quota, 429 | Which Cursor error messages count as a limit |
+| `diff_max_chars` / `digest_max_chars` | `60000` | Size caps for the workspace diff and session digest |
+| `brief_max_chars` | `3500` | Size of the note injected when a session starts |
+| `agents.<name>.command` | `claude`, `codex`, `cursor agent` | How `tapin to` launches each agent |
+| `readers.<name>` | `continues`, or `journal` for Cursor | How each agent's session is read |
 
-- Checkpoint retention and expiration
-- Recognized interruption and limit errors
-- Agent executable paths
-- Enabled agent adapters
-- Redaction and capture behavior
-- Default validation commands
+## Limitations
+
+- **Nothing is verified automatically.** The handoff tells the next agent to check the workspace, but Tap In itself doesn't compare the repository against the captured state.
+- **Reasoning doesn't transfer.** Claude Code stores little of its thinking and Codex encrypts its reasoning; what transfers is what the agent wrote, ran and edited.
+- **Codex limit detection is unconfirmed.** It hasn't been tested against a real Codex limit yet. `tapin to <agent> --from codex` works regardless.
+- **Cursor captures on any agent error,** not only usage limits, because Cursor's hooks don't say why a turn failed.
+- **One waiting handoff per workspace.** A new capture replaces the one waiting to be claimed; older handoffs stay in `.tapin/handoffs/`.
+- **Built and tested on macOS.** Notifications and the default Codex path are macOS-specific.
 
 ## Design principles
 
-Cooper is built around a few principles:
-
-- **Evidence over narration.** Git state and command output are more reliable than a chat summary.
-- **Facts separate from claims.** The next agent should know what was verified, inferred, attempted, and still unknown.
-- **Verify before editing.** A receiving agent should reconcile the current workspace with the handoff before making more changes.
-- **Portable by default.** Handoffs should not depend on one vendor, model, or chat format.
-- **Local-first.** Your repository state and agent history should remain under your control.
-- **Useful without failure.** Cooper supports intentional model switching, recovery, review, and human-to-agent handoff—not only usage-limit interruptions.
+- **Evidence over narration.** The git diff and the commands that ran are more reliable than a summary.
+- **No model call at capture time.** The agent that stopped can't help, so capture reads files only.
+- **Check before editing.** The next agent reconciles the workspace with the handoff before changing anything.
+- **Portable.** Handoffs are plain Markdown and JSON that any agent, or person, can read.
+- **Local-first.** Your code and session history stay on your machine.
+- **Useful without a failure.** `tapin to` works whenever you want to switch, not only after a limit.
 
 ## Development
 
 ```sh
 uv run pytest
+python3 docs/images/make_diagrams.py   # regenerate the diagrams
 ```
 
 ## Contributing
 
-Cooper is intended to be a portable continuity layer for coding agents.
-
 Contributions are especially useful for:
 
-- Agent adapters
-- MCP integrations
-- Checkpoint schema improvements
-- Workspace and validation checks
-- Secret-redaction support
-- Documentation and examples
+- Adapters for more agents (Gemini CLI, GitHub Copilot CLI, OpenCode and others)
+- Real Codex usage-limit error samples, to confirm detection
+- A `verify` command that compares the workspace against a handoff
+- Linux and Windows support
 - Tests across real repositories and agent workflows
