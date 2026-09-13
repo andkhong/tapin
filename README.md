@@ -40,7 +40,7 @@ Other tools can convert or summarize a session when you ask. Tap In adds what th
 
 A handoff mixes evidence with the previous agent's own account. The git status and diff show the real state of the repository. The last message and the conversation show what the agent believed it had done. The handoff tells the next agent to treat those statements as unverified, and to check the workspace before editing.
 
-The diff and the session digest are each capped at 60,000 characters, and common secret formats are redacted before the file is written.
+The workspace section (the diff plus new untracked files) and the session digest are each capped at 60,000 characters, and common secret formats are redacted before the file is written.
 
 ## Install
 
@@ -159,7 +159,7 @@ Any agent that supports MCP can use the Tap In MCP server, with or without an ad
 | `get_handoff` | Reads a handoff without claiming it |
 | `claim_handoff` | Claims the waiting handoff so no other session takes it |
 | `checkpoint` | Records progress, decisions and next steps; the latest one is included in the next handoff |
-| `create_handoff` | Writes a handoff now, e.g. before an agent knows it will stop |
+| `create_handoff` | Writes a handoff now, for example when an agent knows it is about to stop |
 
 Agents without MCP can use the plain file format described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
@@ -186,6 +186,8 @@ Before writing a handoff, Tap In redacts common secret formats: Anthropic and Op
 
 New untracked files are copied into the handoff, except those whose names look like secrets (`.env`, `*.pem`, `*.key`, `id_rsa*`, `credentials.json`, `.netrc`, `*.tfvars` and similar), which are listed without their contents.
 
+Tap In won't load a handoff from a `.tapin/` folder that is tracked by git, so a cloned repository can't plant instructions for your agent.
+
 A handoff can still contain proprietary code, file paths, command output and anything said in the session. Don't share one without reading it. Handoffs are never deleted automatically; remove `.tapin/handoffs/` when you no longer need them.
 
 ## Configuration
@@ -203,21 +205,22 @@ command = ["/Applications/ChatGPT.app/Contents/Resources/codex"]
 | Key | Default | Controls |
 |---|---|---|
 | `handoff_ttl_hours` | `12` | How long an unclaimed handoff is offered to new sessions, capped at 7 days |
-| `limit_errors` | `["rate_limit"]` | Claude Code `StopFailure` errors that trigger capture |
+| `limit_errors` | `["rate_limit"]` | Claude Code `StopFailure` errors that trigger capture. Re-run `tapin install` after changing it, since it also sets the hook matcher |
 | `limit_message_pattern` | usage/rate limit, quota, 429 | Which Cursor error messages count as a limit |
-| `diff_max_chars` / `digest_max_chars` | `60000` | Size caps for the workspace diff and session digest |
+| `diff_max_chars` / `digest_max_chars` | `60000` | Size caps for the workspace section (diff plus new untracked files) and the session digest |
 | `brief_max_chars` | `3500` | Size of the note injected when a session starts |
 | `agents.<name>.command` | `claude`, `codex`, `cursor agent` | How `tapin to` launches each agent |
 | `readers.<name>` | `continues`, or `journal` for Cursor | How each agent's session is read |
+| `continues.command` / `continues.timeout_seconds` | `npx -y continues@4.1.1`, `180` | The command that reads Claude Code and Codex session logs, and how many seconds to wait for it |
 
 ## Limitations
 
 - **Nothing is verified automatically.** The handoff tells the next agent to check the workspace, but Tap In itself doesn't compare the repository against the captured state.
 - **Reasoning doesn't transfer.** Claude Code stores little of its thinking and Codex encrypts its reasoning; what transfers is what the agent wrote, ran and edited.
 - **Codex limit detection is unconfirmed.** It hasn't been tested against a real Codex limit yet. `tapin to <agent> --from codex` works regardless.
-- **Cursor captures on any agent error,** not only usage limits, because Cursor's hooks don't say why a turn failed.
+- **Cursor captures on any agent error,** not only usage limits. Its `stop` hook doesn't say why a turn failed. When the `sessionEnd` that follows carries a usage-limit message, the handoff's reason is updated to `rate_limit`.
 - **One waiting handoff per workspace.** A new capture replaces the one waiting to be claimed; older handoffs stay in `.tapin/handoffs/`.
-- **Built and tested on macOS.** Notifications and the default Codex path are macOS-specific.
+- **Built and tested on macOS.** Notifications, clipboard copy and the default Codex path are macOS-specific. File locking uses `fcntl`, so Windows isn't supported yet.
 
 ## Design principles
 

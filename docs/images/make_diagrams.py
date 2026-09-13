@@ -171,7 +171,7 @@ def anatomy(theme: str) -> str:
         ("Session log", "read by continues · Cursor: hook journal", False,
          "## Session digest", "recent conversation, commands with output, file edits"),
         ("Git", "git status · git diff HEAD", True,
-         "## Workspace", "status, full diff, and the contents of new untracked files"),
+         "## Workspace", "status, diff, and new files (secret-looking ones listed, not copied)"),
     )
     for i, (source, detail, detail_mono, heading, description) in enumerate(rows):
         y = 118 + i * 76
