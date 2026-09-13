@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import os
-import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -47,5 +46,7 @@ def load(path: Path | None = None) -> dict[str, Any]:
     path = path or tapin_home() / "config.toml"
     if not path.exists():
         return copy.deepcopy(DEFAULTS)
+    import tomllib
+
     with path.open("rb") as f:
         return _merge(DEFAULTS, tomllib.load(f))

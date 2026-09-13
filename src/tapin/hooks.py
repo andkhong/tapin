@@ -1,14 +1,18 @@
-"""Entry points invoked by each agent's hook system. A hook must never break the agent that runs it."""
+"""Entry points invoked by each agent's hook system. A hook must never break the agent that runs it.
+
+Journal events fire on every prompt, edit and shell command, so modules only a stop or a pending handoff needs
+are imported inside the functions that use them."""
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import traceback
 from datetime import timedelta
 from typing import Any
 
-from tapin import agents, capture, config, deliver, packet, workspace
+from tapin import agents, config, workspace
 from tapin.agents.base import Agent, StopEvent
 from tapin.md import clip
 from tapin.store import Store, iso, utcnow
@@ -16,11 +20,14 @@ from tapin.store import Store, iso, utcnow
 DUPLICATE_WINDOW = timedelta(minutes=2)
 REFINE_WAIT = timedelta(seconds=2)
 JOURNAL_EVENTS = ("before-submit-prompt", "after-agent-response", "after-file-edit", "after-shell-execution")
+EVENTS = ("session-start", "stop", "stop-failure", "session-end", *JOURNAL_EVENTS)
 JOURNAL_OUTPUT_MAX = 4_000
 
 
 def handle(agent_name: str, event: str, payload: dict[str, Any], cfg: dict[str, Any], background: bool = True) -> dict[str, Any]:
     agent = agents.get(agent_name)
+    if event not in EVENTS:
+        raise ValueError(f"unknown hook event {event!r}; expected one of: {', '.join(EVENTS)}")
     if event == "session-start":
         return session_start(agent, payload, cfg)
     if event in JOURNAL_EVENTS:
@@ -37,6 +44,8 @@ def handle(agent_name: str, event: str, payload: dict[str, Any], cfg: dict[str, 
         else:
             run_capture(stop, cfg)
     else:
+        from tapin import capture
+
         capture.refine_reason(store, stop, REFINE_WAIT if background else timedelta(0))
     return {}
 
@@ -51,6 +60,8 @@ def session_start(agent: Agent, payload: dict[str, Any], cfg: dict[str, Any]) ->
     pending = store.claim(agent.name, start.session_id)
     if pending is None:
         return {}
+    from tapin import packet
+
     brief = packet.brief(store.read_meta(pending.id), store.handoff_file(pending.id), cfg["brief_max_chars"])
     return agent.start_output(brief)
 
@@ -79,6 +90,8 @@ def record_journal(agent: Agent, event: str, payload: dict[str, Any]) -> None:
 
 
 def run_capture(stop: StopEvent, cfg: dict[str, Any]) -> tuple[Store, str]:
+    from tapin import capture, deliver
+
     store, handoff_id = capture.capture(stop, cfg)
     display = agents.get(stop.agent).display
     deliver.notify(
@@ -88,13 +101,22 @@ def run_capture(stop: StopEvent, cfg: dict[str, Any]) -> tuple[Store, str]:
     return store, handoff_id
 
 
+def capture_argv() -> list[str]:
+    from tapin.install import launcher_path
+
+    launcher = launcher_path()
+    if launcher.exists() and os.access(launcher, os.X_OK):
+        return [str(launcher), "capture-event"]
+    return [sys.executable, "-m", "tapin", "capture-event"]
+
+
 def spawn_capture(stop: StopEvent) -> None:
     """Capture in a detached process so the hook returns immediately; reading logs can take seconds."""
     home = config.tapin_home()
     home.mkdir(parents=True, exist_ok=True)
     with open(home / "hooks.log", "a") as log:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "tapin", "capture-event"],
+            capture_argv(),
             stdin=subprocess.PIPE,
             stdout=log,
             stderr=log,

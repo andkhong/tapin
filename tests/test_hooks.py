@@ -1,9 +1,12 @@
+import io
 import json
 import subprocess
+import sys
 
 import pytest
 
-from tapin import hooks
+from tapin import hooks, install
+from tapin.agents.base import StopEvent
 from tapin.store import Store
 
 
@@ -133,3 +136,30 @@ def test_codex_error_from_earlier_turn_is_ignored(repo, cfg, fake_reader):
     payload = {"session_id": "x1", "cwd": str(repo), "transcript_path": str(rollout), "last_assistant_message": "done"}
     hooks.handle("codex", "stop", payload, cfg, background=False)
     assert Store(repo).pending() is None
+
+
+def test_background_capture_runs_through_the_launcher(tmp_path, monkeypatch):
+    fallback = [sys.executable, "-m", "tapin", "capture-event"]
+    assert hooks.capture_argv() == fallback
+
+    target = tmp_path / "tools" / "tapin"
+    target.parent.mkdir()
+    target.write_text("#!/bin/sh\n")
+    target.chmod(0o755)
+    link = install.launcher_path()
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+
+    spawned = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):
+            spawned.append(argv)
+            self.stdin = io.StringIO()
+
+    monkeypatch.setattr(hooks.subprocess, "Popen", FakePopen)
+    hooks.spawn_capture(StopEvent(agent="claude", cwd=tmp_path))
+    assert spawned == [[str(link), "capture-event"]]
+
+    target.unlink()
+    assert hooks.capture_argv() == fallback

@@ -1,6 +1,25 @@
 import subprocess
+from pathlib import Path
 
-from tapin.workspace import ensure_excluded, snapshot
+from tapin.workspace import ensure_excluded, find_root, snapshot
+
+
+def test_find_root_matches_git_toplevel(repo, tmp_path):
+    def toplevel(path):
+        result = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=path, capture_output=True, text=True, check=True)
+        return Path(result.stdout.strip())
+
+    nested = repo / "src" / "pkg"
+    nested.mkdir(parents=True)
+    worktree = tmp_path / "linked"
+    subprocess.run(["git", "worktree", "add", "-q", str(worktree)], cwd=repo, check=True, capture_output=True)
+    (worktree / "docs").mkdir()
+
+    for path in (repo, nested, worktree, worktree / "docs"):
+        assert find_root(path) == toplevel(path)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert find_root(plain) == plain.resolve()
 
 
 def test_snapshot_has_diff_and_new_files(repo):

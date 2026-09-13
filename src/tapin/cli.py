@@ -1,20 +1,25 @@
-"""`tapin` command line."""
+"""`tapin` command line.
+
+`tapin hook` runs on every agent hook event, so it is handled before argparse, and each command imports only the
+modules it uses."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import shlex
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from tapin import agents, capture, config, deliver, hooks, install, packet, workspace
-from tapin.agents.base import StopEvent
-from tapin.store import Store
+from tapin import config
+
+if TYPE_CHECKING:
+    import argparse
 
 
 def cmd_capture(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    from tapin import capture, workspace
+
     root = workspace.find_root(args.cwd)
     resolved = capture.resolve_stop(root, cfg, source=args.source, session_id=args.session, reason=args.reason)
     if resolved is None:
@@ -27,6 +32,9 @@ def cmd_capture(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
 
 
 def cmd_to(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    from tapin import agents, capture, deliver, packet, workspace
+    from tapin.store import Store
+
     root = workspace.find_root(args.cwd)
     target = agents.get(args.target)
     resolved = capture.resolve_stop(
@@ -71,6 +79,9 @@ def cmd_to(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
 
 
 def cmd_status(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    from tapin import workspace
+    from tapin.store import Store
+
     root = workspace.find_root(args.cwd)
     store = Store(root)
     pending = store.pending()
@@ -90,19 +101,30 @@ def cmd_status(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     return 0
 
 
-def cmd_hook(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+def run_hook(args: list[str]) -> int:
+    """`tapin hook <agent> <event>` with the payload on stdin. A hook must never break the agent that runs it, so
+    any error is logged, the event's fallback output is printed, and the exit status is always 0."""
+    from tapin import hooks
+
+    agent = args[0] if args else "unknown"
+    event = args[1] if len(args) > 1 else "unknown"
     try:
+        if len(args) != 2:
+            raise ValueError(f"expected `tapin hook <agent> <event>`, got {args}")
         raw = sys.stdin.read()
-        output = hooks.handle(args.agent, args.event, json.loads(raw) if raw.strip() else {}, cfg)
+        output = hooks.handle(agent, event, json.loads(raw) if raw.strip() else {}, config.load())
     except Exception:
-        hooks.log_exception(args.agent, args.event)
-        output = hooks.fallback_output(args.event)
+        hooks.log_exception(agent, event)
+        output = hooks.fallback_output(event)
     if output:
         print(json.dumps(output))
     return 0
 
 
 def cmd_capture_event(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    from tapin import hooks
+    from tapin.agents.base import StopEvent
+
     stop = None
     try:
         stop = StopEvent.from_json(sys.stdin.read())
@@ -114,6 +136,8 @@ def cmd_capture_event(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
 
 
 def _targets(value: str) -> list[str]:
+    from tapin import agents
+
     names = [name.strip() for name in value.split(",") if name.strip()]
     for name in names:
         agents.get(name)
@@ -121,22 +145,33 @@ def _targets(value: str) -> list[str]:
 
 
 def cmd_install(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
-    for message in install.install(args.agents, cfg, mcp=not args.no_mcp, instructions=args.instructions):
+    from tapin import install
+
+    try:
+        messages = install.install(args.agents, cfg, mcp=not args.no_mcp, instructions=args.instructions)
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    for message in messages:
         print(message)
     return 0
 
 
 def cmd_uninstall(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    from tapin import install
+
     for message in install.uninstall(args.agents, cfg, mcp=not args.no_mcp):
         print(message)
     return 0
 
 
 def cmd_doctor(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    from tapin import install
+
     checks = install.doctor(cfg)
-    for ok, message in checks:
-        print(f"{'ok  ' if ok else 'FAIL'} {message}")
-    return 0 if all(ok for ok, _ in checks) else 1
+    for status, message in checks:
+        print(f"{status:<4} {message}")
+    return 1 if any(status == install.FAIL for status, _ in checks) else 0
 
 
 def cmd_mcp(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
@@ -147,6 +182,10 @@ def cmd_mcp(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    import argparse
+
+    from tapin import agents
+
     parser = argparse.ArgumentParser(prog="tapin", description="Hand off in-progress work between AI coding agents.")
     sub = parser.add_subparsers(dest="command", required=True)
     all_agents = ",".join(agents.NAMES)
@@ -171,26 +210,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("install", help="install hooks (and MCP server) into agent configs")
-    p.add_argument("--agents", type=_targets, default=list(agents.NAMES), help=f"comma-separated (default: {all_agents})")
+    p.add_argument("--agents", type=_targets, help=f"comma-separated, from {all_agents} (default: the agents found on this machine)")
     p.add_argument("--no-mcp", action="store_true", help="skip MCP server registration")
     p.add_argument("--instructions", action="store_true", help="also add a Tap In snippet to ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md")
     p.set_defaults(func=cmd_install)
 
-    p = sub.add_parser("uninstall", help="remove Tap In hooks, MCP registration and snippets")
-    p.add_argument("--agents", type=_targets, default=list(agents.NAMES), help=f"comma-separated (default: {all_agents})")
+    p = sub.add_parser("uninstall", help="remove Tap In hooks, MCP registration, snippets and (for all agents) the launcher")
+    p.add_argument("--agents", type=_targets, help=f"comma-separated (default: {all_agents})")
     p.add_argument("--no-mcp", action="store_true", help="leave MCP registrations alone")
     p.set_defaults(func=cmd_uninstall)
 
-    p = sub.add_parser("doctor", help="check that readers, launchers and hooks are in place")
+    p = sub.add_parser("doctor", help="check the launcher, hooks, Codex hook trust and session readers")
     p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("mcp", help="run the Tap In MCP server over stdio")
     p.set_defaults(func=cmd_mcp)
 
-    p = sub.add_parser("hook", help="entry point for agent hooks (reads the hook payload on stdin)")
-    p.add_argument("agent", choices=agents.NAMES)
-    p.add_argument("event")
-    p.set_defaults(func=cmd_hook)
+    sub.add_parser("hook", help="entry point for agent hooks: tapin hook <agent> <event>, payload on stdin")
 
     p = sub.add_parser("capture-event", help="internal: capture a StopEvent read from stdin")
     p.set_defaults(func=cmd_capture_event)
@@ -198,6 +234,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["hook"]:
+        return run_hook(argv[1:])
     args = build_parser().parse_args(argv)
     return args.func(args, config.load())
 

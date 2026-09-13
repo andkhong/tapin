@@ -38,8 +38,13 @@ def _git(cwd: Path, *args: str) -> str | None:
 
 
 def find_root(cwd: Path) -> Path:
-    top = _git(cwd, "rev-parse", "--show-toplevel")
-    return Path(top.strip()) if top else cwd.resolve()
+    """The git top level: the nearest directory holding `.git` (a directory, or a file in linked worktrees and
+    submodules), else `cwd`. Found without running git because every hook event needs it."""
+    path = cwd.resolve()
+    for candidate in (path, *path.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return path
 
 
 def tapin_tracked(root: Path) -> bool:

@@ -1,4 +1,7 @@
 import io
+import json
+import subprocess
+import sys
 
 from tapin import capture, cli, config, deliver, install
 from tapin.agents.base import StopEvent
@@ -64,10 +67,33 @@ def test_capture_event_failure_is_logged_and_reported_by_doctor(repo, cfg, monke
 
     log = config.tapin_home() / "hooks.log"
     assert " failed" in log.read_text()
-    assert (False, f"hook failures logged in {log}: 1") in install.doctor(cfg)
+    assert (install.FAIL, f"hook failures logged in {log}: 1") in install.doctor(cfg)
 
 
 def test_hook_command_never_fails(repo, monkeypatch, capsys):
-    monkeypatch.setattr("sys.stdin", __import__("io").StringIO("not json"))
+    monkeypatch.setattr("sys.stdin", io.StringIO("not json"))
     assert cli.main(["hook", "cursor", "before-submit-prompt"]) == 0
     assert '"continue": true' in capsys.readouterr().out
+
+
+def test_hook_with_unknown_agent_event_or_arguments_is_logged_not_raised(monkeypatch, capsys):
+    for argv in (["hook", "gemini", "stop"], ["hook", "cursor", "before-submit-promt"], ["hook"]):
+        monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+        assert cli.main(argv) == 0
+    assert capsys.readouterr().out == ""
+    assert (config.tapin_home() / "hooks.log").read_text().count(" failed\n") == 3
+
+
+def test_journal_hook_loads_no_argparse_config_parser_or_capture_modules(repo):
+    code = (
+        "import json, sys\n"
+        "from tapin import cli\n"
+        "status = cli.main(['hook', 'cursor', 'before-submit-prompt'])\n"
+        "heavy = ['argparse', 'tomllib', 'tapin.install', 'tapin.packet', 'tapin.capture', 'tapin.readers']\n"
+        "print(json.dumps({'status': status, 'loaded': [name for name in heavy if name in sys.modules]}), file=sys.stderr)\n"
+    )
+    payload = json.dumps({"conversation_id": "c1", "workspace_roots": [str(repo)], "prompt": "build the parser"})
+    result = subprocess.run([sys.executable, "-c", code], input=payload, capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == {"continue": True}
+    assert json.loads(result.stderr.strip().splitlines()[-1]) == {"status": 0, "loaded": []}
+    assert Store(repo).journal_file("cursor", "c1").exists()

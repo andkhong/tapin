@@ -23,8 +23,8 @@ Other tools can convert or summarize a session when you ask. Tap In adds what th
 ## How it works
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/flow-dark.svg">
-  <img alt="When Claude Code hits its usage limit, its hook starts tapin capture, which turns the session log, working tree and plan into a handoff in .tapin/. You start Codex, which claims the handoff and picks up mid-step." src="docs/images/flow-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/andkhong/tapin/main/docs/images/flow-dark.svg">
+  <img alt="When Claude Code hits its usage limit, its hook starts tapin capture, which turns the session log, working tree and plan into a handoff in .tapin/. You start Codex, which claims the handoff and picks up mid-step." src="https://raw.githubusercontent.com/andkhong/tapin/main/docs/images/flow-light.svg">
 </picture>
 
 1. **An agent stops on its limit.** Its hook starts `tapin capture` in a background process, so the agent isn't held up.
@@ -34,8 +34,8 @@ Other tools can convert or summarize a session when you ask. Tap In adds what th
 ## What a handoff contains
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/handoff-dark.svg">
-  <img alt="Each section of handoff.md is filled from something already on disk: the hook payload, Tap In's instructions, checkpoint notes, the plan file, the session log and git." src="docs/images/handoff-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/andkhong/tapin/main/docs/images/handoff-dark.svg">
+  <img alt="Each section of handoff.md is filled from something already on disk: the hook payload, Tap In's instructions, checkpoint notes, the plan file, the session log and git." src="https://raw.githubusercontent.com/andkhong/tapin/main/docs/images/handoff-light.svg">
 </picture>
 
 A handoff mixes evidence with the previous agent's own account. The git status and diff show the real state of the repository. The last message and the conversation show what the agent believed it had done. The handoff tells the next agent to treat those statements as unverified, and to check the workspace before editing.
@@ -44,27 +44,38 @@ The workspace section (the diff plus new untracked files) and the session digest
 
 ## Install
 
-Tap In requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and Node.js (for `npx continues`).
-
 ```sh
-uv tool install --editable .
-tapin install
-tapin doctor
+curl -LsSf https://raw.githubusercontent.com/andkhong/tapin/main/install.sh | sh
 ```
 
-`tapin install` adds Tap In's hooks to Claude Code, Codex and Cursor, and registers the Tap In MCP server with each.
+If you already use [uv](https://docs.astral.sh/uv/), install from GitHub until Tap In is on PyPI:
 
 ```sh
-tapin install --agents claude,codex   # configure only some agents
+uv tool install https://github.com/andkhong/tapin/archive/refs/heads/main.tar.gz && tapin install
+```
+
+The one-liner needs only `curl`. It installs uv if you don't have it, uv fetches Python 3.11+ if needed, and then `tapin install` sets up the agents it finds and prints what it changed. Set `TAPIN_SKIP_AGENT_SETUP=1` to install just the `tapin` command. Run the one-liner again at any time to update Tap In.
+
+Node.js is optional for now. With it, Claude Code and Codex handoffs include a session digest from [`continues`](https://github.com/yigitkonur/cli-continues). Without it, handoffs still include the git state, the last message, checkpoints and the plan, but not the session digest.
+
+`tapin install` adds Tap In's hooks to Claude Code, Codex and Cursor, and registers the Tap In MCP server with each. With no `--agents`, it only sets up the agents installed on this machine and tells you which ones it skipped. Hooks call a stable launcher at `~/.tapin/bin/tapin`, so upgrading or reinstalling Tap In doesn't change them.
+
+```sh
+tapin install --agents claude,codex   # configure only these agents, even if they aren't detected
 tapin install --no-mcp                # hooks only
 tapin install --instructions          # also add a short Tap In section to ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md
+tapin doctor                          # check the launcher, hooks, Codex hook trust and session reader
 ```
 
 Every config file Tap In changes is backed up first as `<file>.tapin-backup-<timestamp>`.
 
-**Codex only runs hooks you trust.** Open Codex, run `/hooks`, and check that the Tap In `SessionStart` and `Stop` entries are active.
+**Codex only runs hooks you trust.** Open Codex, run `/hooks`, and check that the Tap In `SessionStart` and `Stop` entries are active. `tapin doctor` reports whether Codex has recorded that trust.
 
-To remove everything: `tapin uninstall`.
+To remove everything: `tapin uninstall`. To remove the `tapin` command as well:
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/andkhong/tapin/main/install.sh | sh -s -- --uninstall
+```
 
 ## Quick start
 
@@ -140,8 +151,8 @@ The first new session to start in the folder claims the handoff, and later sessi
 ## Supported agents
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/agents-dark.svg">
-  <img alt="Agents never talk to each other directly. Claude Code, Codex, Cursor and any MCP agent each write a handoff to the project's .tapin/ folder when they stop and load one from it when they start." src="docs/images/agents-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/andkhong/tapin/main/docs/images/agents-dark.svg">
+  <img alt="Agents never talk to each other directly. Claude Code, Codex, Cursor and any MCP agent each write a handoff to the project's .tapin/ folder when they stop and load one from it when they start." src="https://raw.githubusercontent.com/andkhong/tapin/main/docs/images/agents-light.svg">
 </picture>
 
 Agents never talk to each other directly. Each one writes to and reads from the project's `.tapin/` folder, so supporting another agent means adding one adapter rather than a bridge to every other agent.
@@ -234,8 +245,13 @@ command = ["/Applications/ChatGPT.app/Contents/Resources/codex"]
 ## Development
 
 ```sh
+git clone https://github.com/andkhong/tapin
+cd tapin
+uv tool install --editable .            # the `tapin` command runs this checkout
+tapin install
 uv run pytest
-python3 docs/images/make_diagrams.py   # regenerate the diagrams
+sh tests/installer/test_install_sh.sh   # install.sh end to end, in a throwaway HOME
+python3 docs/images/make_diagrams.py    # regenerate the diagrams
 ```
 
 ## Contributing
