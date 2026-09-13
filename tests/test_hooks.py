@@ -17,7 +17,7 @@ def _claude_failure(repo, error="rate_limit", **extra):
         "transcript_path": str(repo / "transcript.jsonl"),
         "cwd": str(repo),
         "error": error,
-        "last_assistant_message": "Halfway through total(); next is the tax rule.",
+        "last_assistant_message": "You've hit your usage limit. Resets at 5pm.",
         **extra,
     }
 
@@ -28,7 +28,9 @@ def test_claude_rate_limit_captures_handoff(repo, cfg, fake_reader):
     pending = store.pending()
     assert pending.from_agent == "claude" and pending.from_session == "s1"
     handoff = store.read_handoff(pending.id)
-    assert "Halfway through total()" in handoff
+    assert "| Reason | rate_limit — You've hit your usage limit. Resets at 5pm. |" in handoff
+    assert "Last message from" not in handoff
+    assert store.read_meta(pending.id)["last_assistant_message"] is None
     assert "Working on total()" in handoff
 
 

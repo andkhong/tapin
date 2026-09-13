@@ -20,7 +20,7 @@ from tapin.store import Store, iso, utcnow
 DUPLICATE_WINDOW = timedelta(minutes=2)
 REFINE_WAIT = timedelta(seconds=2)
 JOURNAL_EVENTS = ("before-submit-prompt", "after-agent-response", "after-file-edit", "after-shell-execution")
-EVENTS = ("session-start", "stop", "stop-failure", "session-end", *JOURNAL_EVENTS)
+EVENTS = ("session-start", "stop", "stop-failure", "session-end", "post-tool-use", *JOURNAL_EVENTS)
 JOURNAL_OUTPUT_MAX = 4_000
 
 
@@ -30,6 +30,8 @@ def handle(agent_name: str, event: str, payload: dict[str, Any], cfg: dict[str, 
         raise ValueError(f"unknown hook event {event!r}; expected one of: {', '.join(EVENTS)}")
     if event == "session-start":
         return session_start(agent, payload, cfg)
+    if event == "post-tool-use":
+        return post_tool_use(agent, payload, cfg)
     if event in JOURNAL_EVENTS:
         record_journal(agent, event, payload)
         return fallback_output(event)
@@ -64,6 +66,28 @@ def session_start(agent: Agent, payload: dict[str, Any], cfg: dict[str, Any]) ->
 
     brief = packet.brief(store.read_meta(pending.id), store.handoff_file(pending.id), cfg["brief_max_chars"])
     return agent.start_output(brief)
+
+
+def post_tool_use(agent: Agent, payload: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
+    """Tell the agent to record a checkpoint when its account nears a usage limit. This runs after every tool call, so
+    it reads the status line's snapshot (Claude Code) or the end of the rollout (Codex) and never looks for the
+    workspace. Cursor reports no usage."""
+    from tapin import usage
+
+    thresholds = cfg.get("warn_thresholds") or []
+    session_id = payload.get("session_id") if isinstance(payload.get("session_id"), str) else None
+    if not thresholds:
+        return {}
+    if agent.name == "claude":
+        windows = usage.claude_windows(session_id)
+    elif agent.name == "codex":
+        windows = usage.codex_windows(payload.get("transcript_path"))
+    else:
+        return {}
+    message = usage.warning_for(agent.name, session_id, windows, thresholds)
+    if message is None:
+        return {}
+    return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": message}}
 
 
 def record_journal(agent: Agent, event: str, payload: dict[str, Any]) -> None:

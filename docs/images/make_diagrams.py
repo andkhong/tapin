@@ -168,7 +168,7 @@ def anatomy(theme: str) -> str:
          "## Where it stopped", "the agent's final message and its latest checkpoint note"),
         ("Plan file", "~/.claude/plans/<slug>.md", True,
          "## Plan", "the plan it was following, when there is one"),
-        ("Session log", "read by continues · Cursor: hook journal", False,
+        ("Session log", "Tap In log reader · Cursor: hook journal", False,
          "## Session digest", "recent conversation, commands with output, file edits"),
         ("Git", "git status · git diff HEAD", True,
          "## Workspace", "status, diff, and new files (secret-looking ones listed, not copied)"),
@@ -194,8 +194,8 @@ def hub(theme: str) -> str:
         theme,
     )
     agents = (
-        (24, 30, "Claude Code", (("on limit", "StopFailure hook", False), ("session", "continues", False), ("on start", "SessionStart hook", False))),
-        (726, 30, "Codex", (("on limit", "Stop hook", False), ("session", "continues", False), ("on start", "SessionStart hook", False))),
+        (24, 30, "Claude Code", (("on limit", "StopFailure hook", False), ("session", "Tap In log reader", False), ("on start", "SessionStart hook", False))),
+        (726, 30, "Codex", (("on limit", "Stop hook", False), ("session", "Tap In log reader", False), ("on start", "SessionStart hook", False))),
         (24, 230, "Cursor", (("on limit", "stop, sessionEnd", False), ("session", "Tap In hook journal", False), ("on start", "sessionStart hook", False))),
         (726, 230, "Any MCP agent", (("on limit", "create_handoff", True), ("session", "checkpoint", True), ("on start", "claim_handoff", True))),
     )

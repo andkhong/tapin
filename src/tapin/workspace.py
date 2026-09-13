@@ -56,16 +56,16 @@ def looks_secret(name: str) -> bool:
     return any(fnmatch.fnmatch(name, pattern) for pattern in SECRET_NAMES)
 
 
-def ensure_excluded(root: Path) -> None:
-    """Keep .tapin/ out of git without touching the tracked .gitignore."""
+def ensure_excluded(root: Path, entry: str = f"{DIR_NAME}/") -> None:
+    """Keep .tapin/ (or another `entry`) out of git without touching the tracked .gitignore."""
     exclude = _git(root, "rev-parse", "--git-path", "info/exclude")
     if exclude is None:
         return
     path = (root / exclude.strip()).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text() if path.exists() else ""
-    if f"{DIR_NAME}/" not in existing.splitlines():
-        path.write_text(existing + ("" if existing.endswith("\n") or not existing else "\n") + f"{DIR_NAME}/\n")
+    if entry not in existing.splitlines():
+        path.write_text(existing + ("" if existing.endswith("\n") or not existing else "\n") + f"{entry}\n")
 
 
 @dataclass

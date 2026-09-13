@@ -22,6 +22,30 @@ def quote(text: str) -> str:
     return "\n".join(f"> {line}" if line else ">" for line in text.strip().splitlines())
 
 
+def clip_tail(text: str, limit: int) -> str:
+    """Keep the end of `text`, where errors and summaries usually are, starting at a line boundary."""
+    if len(text) <= limit:
+        return text
+    kept = text[len(text) - max(0, limit - 1) :]
+    newline = kept.find("\n")
+    if newline != -1 and kept[newline + 1 :].strip():
+        return "…\n" + kept[newline + 1 :]
+    return "…" + kept
+
+
+def one_line(text: str) -> str:
+    """Put a multi-line command on one line, marking where its lines broke."""
+    return " ↵ ".join(" ".join(line.split()) for line in text.splitlines() if line.strip())
+
+
+def code_span(text: str) -> str:
+    """Inline code on one line, delimited by more backticks than any run inside it."""
+    text = " ".join(text.split())
+    ticks = "`" * (max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{ticks}{pad}{text}{pad}{ticks}"
+
+
 def _step(open_fence: str | None, line: str) -> tuple[str | None, bool]:
     match = _FENCE.match(line)
     if not match:

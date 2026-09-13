@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from tapin.agents.base import Agent, StopEvent
+from tapin.md import clip
 from tapin.store import iso, utcnow
 
 _SLUG = re.compile(rb'"slug":"([^"]+)"')
@@ -31,14 +32,17 @@ class Claude(Agent):
         error = payload.get("error")
         if event != "stop-failure" or error not in cfg["limit_errors"]:
             return None
+        # StopFailure's `last_assistant_message` is the API's limit notice, not the agent's last words.
+        parts = (payload.get("error_details"), payload.get("last_assistant_message"))
+        details = " — ".join(part.strip() for part in parts if isinstance(part, str) and part.strip())
         return StopEvent(
             agent=self.name,
             cwd=Path(payload.get("cwd") or os.getcwd()),
             session_id=payload.get("session_id"),
             transcript_path=payload.get("transcript_path"),
             reason=error,
-            details=payload.get("error_details"),
-            last_assistant_message=payload.get("last_assistant_message"),
+            details=clip(details, 500) or None,
+            last_assistant_message=None,
             stopped_at=iso(utcnow()),
         )
 

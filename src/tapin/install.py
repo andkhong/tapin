@@ -14,12 +14,12 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from tapin import agents, config
+from tapin import agents, config, statusline, workspace
 from tapin.store import utcnow
 
 OURS = re.compile(rf"tapin'? hook (?:{'|'.join(re.escape(name) for name in agents.NAMES)}) ")
 EPHEMERAL_DIRS = {"archive-v0", "_npx"}
-CODEX_TRUST_LABELS = {"SessionStart": "session_start", "Stop": "stop"}
+CODEX_TRUST_LABELS = {"SessionStart": "session_start", "Stop": "stop", "PostToolUse": "post_tool_use"}
 OK, WARN, FAIL = "ok", "warn", "FAIL"
 SNIPPET_BEGIN = "<!-- tapin:begin -->"
 SNIPPET_END = "<!-- tapin:end -->"
@@ -149,6 +149,7 @@ def desired_hooks(agent: str, exe: str, cfg: dict[str, Any]) -> dict[str, list[d
             "SessionStart": [
                 {"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": _command(exe, agent, "session-start")}]}
             ],
+            "PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": _command(exe, agent, "post-tool-use")}]}],
         }
     if agent == "codex":
         return {
@@ -159,6 +160,9 @@ def desired_hooks(agent: str, exe: str, cfg: dict[str, Any]) -> dict[str, list[d
                 }
             ],
             "Stop": [{"hooks": [{"type": "command", "command": _command(exe, agent, "stop")}]}],
+            "PostToolUse": [
+                {"matcher": "*", "hooks": [{"type": "command", "command": _command(exe, agent, "post-tool-use"), "statusMessage": "Checking usage"}]}
+            ],
         }
     if agent == "cursor":
         return {event: [{"command": _command(exe, agent, ours)}] for event, ours in CURSOR_EVENTS.items()}
@@ -226,12 +230,9 @@ def _place(entries: list[dict[str, Any]], wanted: list[dict[str, Any]]) -> list[
     return result
 
 
-def apply_hooks(agent: str, exe: str | None, cfg: dict[str, Any]) -> bool:
-    """Install Tap In's hooks for `agent`, or remove them when `exe` is None. Returns True if the file changed."""
-    path = hook_files()[agent]
-    if exe is None and not path.exists():
-        return False
-    data = _load_json(path)
+def _update_hooks(data: dict[str, Any], agent: str, exe: str | None, cfg: dict[str, Any]) -> bool:
+    """Put Tap In's hooks for `agent` into a hooks file's contents, or take them out when `exe` is None. Returns True
+    if the hooks changed."""
     existing = data.get("hooks", {})
     wanted = desired_hooks(agent, exe, cfg) if exe is not None else {}
     hooks = {}
@@ -245,7 +246,151 @@ def apply_hooks(agent: str, exe: str | None, cfg: dict[str, Any]) -> bool:
         data["hooks"] = hooks
     else:
         data.pop("hooks", None)
+    return hooks != existing
+
+
+def apply_hooks(agent: str, exe: str | None, cfg: dict[str, Any]) -> bool:
+    """Install Tap In's hooks for `agent`, or remove them when `exe` is None. Returns True if the file changed."""
+    path = hook_files()[agent]
+    if exe is None and not path.exists():
+        return False
+    data = _load_json(path)
+    _update_hooks(data, agent, exe, cfg)
     return _write_json(path, data)
+
+
+def apply_claude(exe: str | None, cfg: dict[str, Any], status_line: bool = True) -> list[str]:
+    """Claude Code's hooks and status line (or with exe=None, their removal), in one write so settings.json is
+    backed up once."""
+    path = hook_files()["claude"]
+    if exe is None and not path.exists():
+        return [f"{path}: hooks not present"]
+    data = _load_json(path)
+    hooks_changed = _update_hooks(data, "claude", exe, cfg)
+    line = _update_statusline(data, exe) if status_line else None
+    _write_json(path, data)
+    if exe is None:
+        messages = [f"{path}: hooks {'removed' if hooks_changed else 'not present'}"]
+    else:
+        messages = [f"{path}: hooks {'installed' if hooks_changed else 'already installed'}"]
+    return messages + ([f"{path}: {line}"] if line else [])
+
+
+def _describe(status_line: Any) -> str:
+    command = statusline.command_of(status_line)
+    return f"`{command}`" if command else json.dumps(status_line)
+
+
+def _our_statusline(exe: str, replaced: Any = None) -> dict[str, Any]:
+    """Tap In's status line, keeping the replaced one's other settings such as `padding` and `refreshInterval`."""
+    kept = {key: value for key, value in replaced.items() if key not in ("type", "command")} if isinstance(replaced, dict) else {}
+    return {"type": "command", "command": f"{shlex.quote(exe)} statusline", **kept}
+
+
+def _update_statusline(data: dict[str, Any], exe: str | None) -> str | None:
+    """Point Claude Code's user status line at `tapin statusline`, which runs and shows a status line the user already
+    had (recorded in ~/.tapin/statusline.json); with exe=None, put theirs back. Returns what changed."""
+    current = data.get("statusLine")
+    record = statusline.load_record()
+    if exe is None:
+        original = record.pop("original", None)
+        statusline.save_record(record)
+        if not statusline.is_ours(current):
+            return None
+        if original is None:
+            del data["statusLine"]
+            return "status line removed"
+        data["statusLine"] = original
+        return f"status line restored to {_describe(original)}"
+    if statusline.is_ours(current):
+        wanted = _our_statusline(exe, current)
+        if wanted == current:
+            return "status line already installed"
+        data["statusLine"] = wanted
+        return "status line updated"
+    if current is None:
+        if record.pop("original", None) is not None:
+            statusline.save_record(record)
+        data["statusLine"] = _our_statusline(exe)
+        return "status line installed (it shows usage, and Claude Code's usage warnings need it)"
+    record["original"] = current
+    statusline.save_record(record)
+    data["statusLine"] = _our_statusline(exe, current)
+    return f"status line installed; it runs your previous one ({_describe(current)}) and shows its output"
+
+
+def project_statusline(directory: Path) -> Any:
+    """The status line a project's own settings set, if any. Claude Code lets .claude/settings.local.json override
+    .claude/settings.json, and either one override the user's settings, where Tap In's is."""
+    for name in ("settings.local.json", "settings.json"):
+        line = _load_json(directory / ".claude" / name).get("statusLine")
+        if line is not None:
+            return line
+    return None
+
+
+def wrap_project_statusline(directory: Path) -> str:
+    """Set Tap In's status line in the project's settings.local.json, running the project's own, so that usage
+    warnings also work in a project whose status line would otherwise override Tap In's."""
+    directory = directory.expanduser().resolve()
+    local = directory / ".claude" / "settings.local.json"
+    current = project_statusline(directory)
+    record = statusline.load_record()
+    projects = record.get("projects") if isinstance(record.get("projects"), dict) else {}
+    if current is None:
+        return f"{directory} sets no status line of its own, so none is needed: Tap In's status line runs there."
+    if statusline.is_ours(current):
+        entry = projects.get(str(directory))
+        runs = f" and runs {_describe(entry['original'])}" if isinstance(entry, dict) and "original" in entry else ""
+        return f"{local}: the status line is already Tap In's{runs}"
+    launcher = launcher_path()
+    if not launcher.exists():
+        raise RuntimeError(f"Tap In's launcher {launcher} is missing; run `tapin install` first.")
+    data = _load_json(local)
+    entry: dict[str, Any] = {"original": current}
+    if "statusLine" in data:
+        entry["previous"] = data["statusLine"]
+    if not local.exists():
+        entry["created"] = True
+    record["projects"] = {**projects, str(directory): entry}
+    statusline.save_record(record)
+    data["statusLine"] = _our_statusline(str(launcher), current)
+    _write_json(local, data)
+    if entry.get("created"):
+        # Claude Code keeps the settings.local.json it creates out of git; this one holds a path on this machine.
+        root = workspace.find_root(directory)
+        workspace.ensure_excluded(root, "/" + local.relative_to(root).as_posix())
+    return f"{local}: status line set to Tap In's, which runs this project's own ({_describe(current)}) and shows its output"
+
+
+def unwrap_project_statusline(directory: Path) -> str:
+    directory = directory.expanduser().resolve()
+    local = directory / ".claude" / "settings.local.json"
+    record = statusline.load_record()
+    projects = dict(record.get("projects") or {})
+    entry = projects.pop(str(directory), None)
+    if not isinstance(entry, dict):
+        return f"{directory}: Tap In hasn't wrapped this project's status line"
+    data = _load_json(local)
+    if not statusline.is_ours(data.get("statusLine")):
+        message = f"{local}: the status line isn't Tap In's any more, so it was left alone"
+    else:
+        if "previous" in entry:
+            data["statusLine"] = entry["previous"]
+            message = f"{local}: status line restored to {_describe(entry['previous'])}"
+        else:
+            del data["statusLine"]
+            message = f"{local}: Tap In's status line removed, so the project's own applies again"
+        if not data and entry.get("created"):
+            local.unlink()
+        else:
+            _write_json(local, data)
+    if projects:
+        record["projects"] = projects
+    else:
+        record.pop("projects", None)
+    statusline.save_record(record)
+    return message
 
 
 def tapin_hooks(agent: str) -> list[tuple[str, int, int | None, str]]:
@@ -318,12 +463,13 @@ def codex_trust_steps(exe: str) -> str:
             "",
             "    /hooks",
             "",
-            "Then trust both Tap In hooks:",
+            "Then trust the three Tap In hooks:",
             "",
             f"    SessionStart  {_command(exe, 'codex', 'session-start')}",
             f"    Stop          {_command(exe, 'codex', 'stop')}",
+            f"    PostToolUse   {_command(exe, 'codex', 'post-tool-use')}",
             "",
-            "`tapin doctor` shows whether Codex has recorded the trust.",
+            "`tapin doctor` shows whether Codex has recorded the trust. PostToolUse warns Codex before a usage limit.",
         ]
     )
 
@@ -381,7 +527,17 @@ def _codex_fully_trusted() -> bool:
     return bool(states) and all(state == "trusted" for state in states.values())
 
 
-def install(targets: list[str] | None, cfg: dict[str, Any], mcp: bool = True, instructions: bool = False) -> list[str]:
+def codex_hooks_behind_others() -> list[str]:
+    """Codex events where another tool's hooks (such as Graft's) come before Tap In's in hooks.json. Codex keys hook
+    trust to group and handler positions, so a hook added or removed ahead of Tap In's moves it and Codex stops
+    trusting it."""
+    first: dict[str, tuple[int, int | None]] = {}
+    for event, group_index, handler_index, _ in tapin_hooks("codex"):
+        first.setdefault(event, (group_index, handler_index))
+    return [event for event, (group_index, handler_index) in first.items() if group_index or handler_index]
+
+
+def install(targets: list[str] | None, cfg: dict[str, Any], mcp: bool = True, instructions: bool = False, status_line: bool = True) -> list[str]:
     """Set up `targets`, or with None every agent detected on this machine."""
     messages = [ensure_launcher()]
     exe = str(launcher_path())
@@ -395,8 +551,17 @@ def install(targets: list[str] | None, cfg: dict[str, Any], mcp: bool = True, in
                     f"Run `tapin install --agents {name}` to set it up anyway."
                 )
     for agent in targets:
-        changed = apply_hooks(agent, exe, cfg)
-        messages.append(f"{hook_files()[agent]}: hooks {'installed' if changed else 'already installed'}")
+        if agent == "claude":
+            messages += apply_claude(exe, cfg, status_line)
+        else:
+            changed = apply_hooks(agent, exe, cfg)
+            messages.append(f"{hook_files()[agent]}: hooks {'installed' if changed else 'already installed'}")
+            if agent == "codex":
+                messages += [
+                    f"`{event}` in {hook_files()[agent]} has another tool's hooks before Tap In's; "
+                    "if Codex shows Tap In's hook as untrusted in /hooks, trust it again."
+                    for event in codex_hooks_behind_others()
+                ]
         if mcp:
             messages.append(apply_mcp(agent, exe, cfg))
     if instructions:
@@ -411,8 +576,12 @@ def uninstall(targets: list[str] | None, cfg: dict[str, Any], mcp: bool = True) 
     targets = targets or list(agents.NAMES)
     messages = []
     for agent in targets:
-        changed = apply_hooks(agent, None, cfg)
-        messages.append(f"{hook_files()[agent]}: hooks {'removed' if changed else 'not present'}")
+        if agent == "claude":
+            messages += apply_claude(None, cfg)
+            messages += [unwrap_project_statusline(Path(directory)) for directory in list(statusline.load_record().get("projects") or {})]
+        else:
+            changed = apply_hooks(agent, None, cfg)
+            messages.append(f"{hook_files()[agent]}: hooks {'removed' if changed else 'not present'}")
         if mcp:
             messages.append(apply_mcp(agent, None, cfg))
     for path in instruction_files():
@@ -494,10 +663,59 @@ def doctor(cfg: dict[str, Any]) -> list[tuple[str, str]]:
         else:
             checks.append((WARN, f"{agent.display} command `{command}` not found; `tapin to {name}` needs it"))
         checks += _hook_checks(name, cfg, launcher)
+        if name == "claude":
+            checks += _statusline_checks(cfg) + _project_statusline_checks(Path.cwd())
         if name == "codex":
             checks += _codex_trust_checks()
 
     log = config.tapin_home() / "hooks.log"
-    failures = log.read_text().count(" failed\n") if log.exists() else 0
+    logged = log.read_text() if log.exists() else ""
+    failures = logged.count(" failed\n")
     checks.append((OK if failures == 0 else FAIL, f"hook failures logged in {log}: {failures}"))
+    unfinished = logged.count(statusline.LOG_MARKER)
+    if unfinished:
+        checks.append(
+            (WARN, f"your previous status line command timed out or couldn't run {unfinished} time(s); Tap In showed its usage line instead (see {log})")
+        )
     return checks
+
+
+def _statusline_checks(cfg: dict[str, Any]) -> list[tuple[str, str]]:
+    path = hook_files()["claude"]
+    try:
+        current = _load_json(path).get("statusLine")
+        original = statusline.load_record().get("original")
+        installed = bool(tapin_hooks("claude"))
+    except (OSError, ValueError) as exc:
+        return [(WARN, f"Claude Code status line: can't read {path} or {statusline.record_path()}: {exc}")]
+    checks = []
+    if statusline.is_ours(current):
+        runs = f" and runs your previous one ({_describe(original)})" if original is not None else ""
+        checks.append((OK, f"Claude Code status line in {path} is Tap In's{runs}. Claude Code's usage warnings need it, and a Pro or Max plan"))
+    elif installed or detected("claude", cfg):
+        what = "isn't set" if current is None else f"is {_describe(current)}, not Tap In's"
+        checks.append((WARN, f"Claude Code status line in {path} {what}, so Claude Code gets no usage warnings (they need Tap In's status line); run `tapin install`"))
+    if not cfg.get("warn_thresholds"):
+        checks.append((OK, "usage warnings are off because warn_thresholds is empty"))
+    return checks
+
+
+def _project_statusline_checks(directory: Path) -> list[tuple[str, str]]:
+    """A status line in the project's own settings overrides Tap In's user-level one, which then never runs there."""
+    try:
+        if (directory / ".claude").resolve() == claude_dir().resolve():
+            return []
+        current = project_statusline(directory)
+    except (OSError, ValueError):
+        return []
+    if current is None:
+        return []
+    if statusline.is_ours(current):
+        return [(OK, f"this project's status line ({directory / '.claude'}) is Tap In's, so usage warnings work here")]
+    return [
+        (
+            WARN,
+            f"Claude Code warnings before the limit are off in this project ({directory}) because its own status line overrides "
+            "Tap In's; run `tapin statusline --project`",
+        )
+    ]

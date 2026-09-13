@@ -109,6 +109,8 @@ def build(
     lines += ["## Where it stopped", ""]
     if stop.last_assistant_message:
         lines += [f"### Last message from {from_display}", "", quote(stop.last_assistant_message), ""]
+    elif digest and "Last message before the stop" in digest:
+        lines += ["_The stop event carried no final message. See **Last message before the stop** in the session digest below._", ""]
     else:
         lines += ["_No final message was captured. The most recent conversation is in the session digest below._", ""]
     if note:

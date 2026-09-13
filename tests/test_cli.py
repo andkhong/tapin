@@ -97,3 +97,17 @@ def test_journal_hook_loads_no_argparse_config_parser_or_capture_modules(repo):
     assert json.loads(result.stdout) == {"continue": True}
     assert json.loads(result.stderr.strip().splitlines()[-1]) == {"status": 0, "loaded": []}
     assert Store(repo).journal_file("cursor", "c1").exists()
+
+
+def test_checkpoint_command_writes_the_note_the_mcp_tool_would(repo, capsys):
+    argv = ["checkpoint", "--agent", "codex", "--summary", "Parser done; retry loop half written in fetch.py"]
+    argv += ["--next-steps", "Add the backoff test", "--decisions", "Keep it synchronous", "--workspace", str(repo)]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("Checkpoint saved to ") and out.endswith("/.tapin/notes.md")
+
+    note = Store(repo).latest_note()
+    assert note.splitlines()[0].startswith("## ") and note.splitlines()[0].endswith(" — codex")
+    assert note.endswith(
+        "**Done so far:** Parser done; retry loop half written in fetch.py\n\n**Decisions:** Keep it synchronous\n\n**Next steps:** Add the backoff test"
+    )

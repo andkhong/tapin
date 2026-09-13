@@ -105,6 +105,9 @@ hooks_installed_once() {
   check "Claude Code StopFailure hook calls the launcher, once" has_once "\"$LAUNCHER hook claude stop-failure\"" "$CLAUDE_SETTINGS"
   check "Codex SessionStart hook calls the launcher, once" has_once "\"$LAUNCHER hook codex session-start\"" "$CODEX_HOOKS"
   check "Codex Stop hook calls the launcher, once" has_once "\"$LAUNCHER hook codex stop\"" "$CODEX_HOOKS"
+  check "Claude Code PostToolUse hook calls the launcher, once" has_once "\"$LAUNCHER hook claude post-tool-use\"" "$CLAUDE_SETTINGS"
+  check "Codex PostToolUse hook calls the launcher, once" has_once "\"$LAUNCHER hook codex post-tool-use\"" "$CODEX_HOOKS"
+  check "Claude Code status line calls the launcher, once" has_once "\"$LAUNCHER statusline\"" "$CLAUDE_SETTINGS"
 }
 
 step "build a wheel from $REPO"
@@ -133,6 +136,8 @@ check "doctor: launcher resolves" grep -q -F "ok   launcher $LAUNCHER runs" "$WO
 check "doctor: Claude Code hooks call the launcher" grep -q -F "ok   Claude Code hooks in $CLAUDE_SETTINGS call the launcher" "$WORK/doctor.log"
 check "doctor: Codex hooks call the launcher" grep -q -F "ok   Codex hooks in $CODEX_HOOKS call the launcher" "$WORK/doctor.log"
 check "doctor: Codex trust not recorded yet" grep -q -F "warn Codex SessionStart hook: not trusted yet" "$WORK/doctor.log"
+check "doctor: Codex PostToolUse trust not recorded yet" grep -q -F "warn Codex PostToolUse hook: not trusted yet" "$WORK/doctor.log"
+check "doctor: Claude Code status line is Tap In's" grep -q -F "ok   Claude Code status line in $CLAUDE_SETTINGS is Tap In's" "$WORK/doctor.log"
 
 step "install.sh again"
 backups_before=$(backups)
@@ -168,6 +173,7 @@ check "agent setup skipped" grep -q "TAPIN_SKIP_AGENT_SETUP=1" "$WORK/default-sp
 step "install.sh --uninstall"
 run_logged "$WORK/uninstall.log" sh "$REPO/install.sh" --uninstall
 check "Claude Code hooks removed" absent "hook claude" "$CLAUDE_SETTINGS"
+check "Claude Code status line removed" absent "statusline" "$CLAUDE_SETTINGS"
 check "Codex hooks removed" absent "hook codex" "$CODEX_HOOKS"
 check "Claude Code MCP server removed" test "$(tail -n 1 "$WORK/claude-calls.log")" = "mcp remove --scope user tapin"
 check "Codex MCP server removed" test "$(tail -n 1 "$WORK/codex-calls.log")" = "mcp remove tapin"

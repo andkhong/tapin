@@ -9,16 +9,19 @@ from typing import Any
 
 DEFAULTS: dict[str, Any] = {
     "handoff_ttl_hours": 12,
-    "diff_max_chars": 60_000,
-    "digest_max_chars": 60_000,
+    "diff_max_chars": 20_000,
+    "digest_max_chars": 12_000,
     "brief_max_chars": 3_500,
     # Claude StopFailure `error` values that count as hitting a limit.
     "limit_errors": ["rate_limit"],
     # Matched against free-text error messages (Cursor sessionEnd).
     "limit_message_pattern": r"(usage|rate)[ _-]?limit|quota|too many requests|\b429\b",
-    # Which reader summarizes each agent's session: `continues` parses native logs,
-    # `journal` renders what Tap In's own hooks recorded.
-    "readers": {"claude": "continues", "codex": "continues", "cursor": "journal"},
+    # Usage percentages at which a Claude Code or Codex agent is told to record a checkpoint; [] turns warnings off.
+    "warn_thresholds": [90, 97],
+    # Which reader summarizes each agent's session. `claude-log` and `codex-log` read Claude Code's and Codex's
+    # own session logs and need nothing installed; `journal` renders what Tap In's own hooks recorded (Cursor).
+    # `continues` (npm, needs Node.js) is optional and can be chosen for Claude Code or Codex instead.
+    "readers": {"claude": "claude-log", "codex": "codex-log", "cursor": "journal"},
     "continues": {"command": ["npx", "-y", "continues@4.1.1"], "timeout_seconds": 180},
     "agents": {
         "claude": {"command": ["claude"]},

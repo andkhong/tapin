@@ -40,4 +40,5 @@ jobs:
         run: |
           sh -n install.sh
           shellcheck install.sh tests/installer/test_install_sh.sh
+          shellcheck scripts/demo-setup.sh
       - run: sh tests/installer/test_install_sh.sh

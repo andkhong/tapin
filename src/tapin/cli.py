@@ -121,6 +121,51 @@ def run_hook(args: list[str]) -> int:
     return 0
 
 
+def run_statusline() -> int:
+    """`tapin statusline`, Claude Code's status line command, with the payload on stdin. Like a hook it must never
+    break Claude Code, so on any error it prints nothing, logs, and exits 0."""
+    try:
+        from tapin import statusline
+
+        stdin = getattr(sys.stdin, "buffer", None)
+        output = statusline.render(stdin.read() if stdin is not None else sys.stdin.read().encode())
+    except Exception:
+        from tapin import hooks
+
+        hooks.log_exception("claude", "statusline")
+        return 0
+    stdout = getattr(sys.stdout, "buffer", None)
+    if stdout is None:
+        sys.stdout.write(output.decode(errors="replace"))
+    else:
+        sys.stdout.flush()
+        stdout.write(output)
+        stdout.flush()
+    return 0
+
+
+def cmd_statusline(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    from tapin import install
+
+    if not args.project:
+        print("`tapin statusline` reads a Claude Code status line payload on stdin. To wrap a project's own status line, run `tapin statusline --project [dir]`.", file=sys.stderr)
+        return 2
+    try:
+        message = install.unwrap_project_statusline(args.dir) if args.remove else install.wrap_project_statusline(args.dir)
+    except (RuntimeError, OSError, ValueError) as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    print(message)
+    return 0
+
+
+def cmd_checkpoint(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    from tapin import mcp_server
+
+    print(mcp_server.checkpoint(str(args.workspace), args.agent, args.summary, args.next_steps, args.decisions))
+    return 0
+
+
 def cmd_capture_event(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     from tapin import hooks
     from tapin.agents.base import StopEvent
@@ -148,7 +193,7 @@ def cmd_install(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     from tapin import install
 
     try:
-        messages = install.install(args.agents, cfg, mcp=not args.no_mcp, instructions=args.instructions)
+        messages = install.install(args.agents, cfg, mcp=not args.no_mcp, instructions=args.instructions, status_line=not args.no_statusline)
     except RuntimeError as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -213,15 +258,30 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--agents", type=_targets, help=f"comma-separated, from {all_agents} (default: the agents found on this machine)")
     p.add_argument("--no-mcp", action="store_true", help="skip MCP server registration")
     p.add_argument("--instructions", action="store_true", help="also add a Tap In snippet to ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md")
+    p.add_argument("--no-statusline", action="store_true", help="don't set Tap In's Claude Code status line (Claude Code then gets no usage warnings)")
     p.set_defaults(func=cmd_install)
 
-    p = sub.add_parser("uninstall", help="remove Tap In hooks, MCP registration, snippets and (for all agents) the launcher")
+    p = sub.add_parser("uninstall", help="remove Tap In hooks, status line, MCP registration, snippets and (for all agents) the launcher")
     p.add_argument("--agents", type=_targets, help=f"comma-separated (default: {all_agents})")
     p.add_argument("--no-mcp", action="store_true", help="leave MCP registrations alone")
     p.set_defaults(func=cmd_uninstall)
 
-    p = sub.add_parser("doctor", help="check the launcher, hooks, Codex hook trust and session readers")
+    p = sub.add_parser("doctor", help="check the launcher, hooks, status line, Codex hook trust and session readers")
     p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("checkpoint", help="record progress for whoever continues this work (the MCP checkpoint tool, from the shell)")
+    p.add_argument("--agent", required=True, help="the agent recording it, e.g. claude or codex")
+    p.add_argument("--summary", required=True, help="what is done so far, and what is in progress (file and step)")
+    p.add_argument("--next-steps", required=True, help="the exact next step")
+    p.add_argument("--decisions", default="", help="key decisions and why")
+    p.add_argument("--workspace", type=Path, default=Path.cwd())
+    p.set_defaults(func=cmd_checkpoint)
+
+    p = sub.add_parser("statusline", help="Claude Code's status line command (payload on stdin); --project wraps a project's own status line")
+    p.add_argument("--project", action="store_true", help="wrap the status line set in DIR/.claude/settings(.local).json, which overrides Tap In's")
+    p.add_argument("--remove", action="store_true", help="with --project, put the project's status line back")
+    p.add_argument("dir", nargs="?", type=Path, default=Path.cwd(), help="the project directory (default: the current directory)")
+    p.set_defaults(func=cmd_statusline)
 
     p = sub.add_parser("mcp", help="run the Tap In MCP server over stdio")
     p.set_defaults(func=cmd_mcp)
@@ -237,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["hook"]:
         return run_hook(argv[1:])
+    if argv == ["statusline"]:
+        return run_statusline()
     args = build_parser().parse_args(argv)
     return args.func(args, config.load())
 

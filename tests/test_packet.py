@@ -71,3 +71,12 @@ def test_brief_is_bounded_and_points_to_file():
     text = brief(meta, Path("/w/.tapin/handoffs/id/handoff.md"), 3_500)
     assert len(text) <= 3_500
     assert "/w/.tapin/handoffs/id/handoff.md" in text
+
+
+def test_where_it_stopped_points_to_the_digest_when_the_stop_had_no_message(repo, cfg):
+    digest = "# Session Handoff Context\n\n## Last message before the stop\n\n> Writing parse_row()\n"
+    built = build(_stop(last_assistant_message=None), "Claude Code", snapshot(repo, 1_000), digest, None, None, None, cfg)
+    assert "_The stop event carried no final message. See **Last message before the stop** in the session digest below._" in built.markdown
+
+    bare = build(_stop(last_assistant_message=None), "Claude Code", snapshot(repo, 1_000), None, "no session", None, None, cfg)
+    assert "_No final message was captured. The most recent conversation is in the session digest below._" in bare.markdown

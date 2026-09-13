@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tapin import agents, cli, install
+from tapin import agents, cli, install, statusline
 
 ALL = ["claude", "codex", "cursor"]
 OLD_EXE = "/Users/you/.local/share/uv/tools/tapin/bin/tapin"
@@ -115,7 +115,7 @@ def test_reinstall_replaces_old_hooks_in_place(tmp_path, cfg, exe, launcher):
     assert _commands(codex["SessionStart"]) == ["echo before", f"{launcher} hook codex session-start", "echo after"]
     assert _commands(codex["Stop"]) == [f"{launcher} hook codex stop", "echo after"]
     positions = [(event, group, handler) for event, group, handler, _ in install.tapin_hooks("codex")]
-    assert positions == [("SessionStart", 1, 0), ("Stop", 0, 0)]
+    assert positions == [("SessionStart", 1, 0), ("Stop", 0, 0), ("PostToolUse", 0, 0)]
     cursor = json.loads(cursor_file.read_text())["hooks"]
     assert cursor["stop"] == [{"command": f"{launcher} hook cursor stop"}, {"command": "afplay done.aiff"}]
 
@@ -222,6 +222,7 @@ def test_install_prints_codex_trust_steps_until_trust_is_recorded(tmp_path, cfg,
     assert "\n    /hooks\n" in steps
     assert f"SessionStart  {launcher} hook codex session-start" in steps
     assert f"Stop          {launcher} hook codex stop" in steps
+    assert f"PostToolUse   {launcher} hook codex post-tool-use" in steps
 
     _trust(tmp_path, _current_trust(tmp_path))
     assert not any(message.startswith("Codex runs a hook") for message in install.install(["codex"], cfg, mcp=False))
@@ -243,13 +244,13 @@ def test_moving_hooks_to_the_launcher_makes_codex_trust_stale(tmp_path, cfg, exe
     hooks_json.write_text(json.dumps({"hooks": install.desired_hooks("codex", OLD_EXE, cfg)}))
     old_trust = _current_trust(tmp_path)
     _trust(tmp_path, old_trust)
-    assert install.codex_trust() == {"SessionStart": "trusted", "Stop": "trusted"}
+    assert install.codex_trust() == {"SessionStart": "trusted", "Stop": "trusted", "PostToolUse": "trusted"}
 
     messages = install.install(["codex"], cfg, mcp=False)
 
     new_trust = _current_trust(tmp_path)
     assert new_trust.keys() == old_trust.keys() and new_trust != old_trust
-    assert install.codex_trust() == {"SessionStart": "changed", "Stop": "changed"}
+    assert install.codex_trust() == {"SessionStart": "changed", "Stop": "changed", "PostToolUse": "changed"}
     assert (install.WARN, "Codex Stop hook: changed since you trusted it; run /hooks in Codex to trust it again") in install.doctor(cfg)
     assert messages[-1].startswith("Codex runs a hook only after you trust it.")
 
@@ -288,12 +289,13 @@ def test_doctor_checks_launcher_and_hook_paths(tmp_path, cfg, exe, launcher):
 
 def test_doctor_checks_node_only_for_continues_readers(cfg, monkeypatch):
     monkeypatch.setattr(install.shutil, "which", lambda name: None)
+    assert not any("npx" in message for _, message in install.doctor(cfg))
+
+    cfg["readers"]["claude"] = "continues"
     node = [(status, message) for status, message in install.doctor(cfg) if "`npx`" in message]
     assert len(node) == 1 and node[0][0] == install.WARN
     assert "no session digest" in node[0][1] and "still work" in node[0][1]
-
-    cfg["readers"] = {"claude": "journal", "codex": "journal", "cursor": "journal"}
-    assert not any("npx" in message for _, message in install.doctor(cfg))
+    assert "Claude Code handoffs" in node[0][1]
 
 
 def test_snippet_added_once_and_removed_cleanly(tmp_path):
@@ -304,3 +306,218 @@ def test_snippet_added_once_and_removed_cleanly(tmp_path):
     assert path.read_text().count(install.SNIPPET_BEGIN) == 1
     assert install.apply_snippet(path, install=False)
     assert path.read_text() == "# My rules\n\nBe concise.\n"
+
+
+def test_adding_post_tool_use_keeps_codex_trust_for_existing_hooks(tmp_path, cfg, exe, launcher):
+    hooks_json = tmp_path / "codex-home" / "hooks.json"
+    hooks_json.parent.mkdir(parents=True)
+    before = install.desired_hooks("codex", launcher, cfg)
+    mine = {"type": "command", "command": "echo mine"}
+    existing = {"SessionStart": [{"hooks": [mine]}, *before["SessionStart"]], "Stop": before["Stop"], "PostToolUse": [{"matcher": "apply_patch", "hooks": [mine]}]}
+    hooks_json.write_text(json.dumps({"hooks": existing}))
+    trusted = _current_trust(tmp_path)
+    _trust(tmp_path, trusted)
+    assert install.codex_trust() == {"SessionStart": "trusted", "Stop": "trusted"}
+
+    install.install(["codex"], cfg, mcp=False)
+
+    positions = [(event, group, handler) for event, group, handler, _ in install.tapin_hooks("codex")]
+    assert positions == [("SessionStart", 1, 0), ("Stop", 0, 0), ("PostToolUse", 1, 0)]
+    assert install.CODEX_TRUST_LABELS["PostToolUse"] == "post_tool_use"
+    after = _current_trust(tmp_path)
+    assert {key: value for key, value in after.items() if ":post_tool_use:" not in key} == trusted
+    assert f"{hooks_json}:post_tool_use:1:0" in after
+    assert install.codex_trust() == {"SessionStart": "trusted", "Stop": "trusted", "PostToolUse": "missing"}
+    assert (install.WARN, "Codex PostToolUse hook: not trusted yet; run /hooks in Codex") in install.doctor(cfg)
+
+
+def test_install_sets_wraps_and_restores_the_claude_status_line(tmp_path, cfg, exe, launcher):
+    settings = tmp_path / "claude-home" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    ours = f"{launcher} statusline"
+
+    install.install(["claude"], cfg, mcp=False)
+    assert json.loads(settings.read_text())["statusLine"] == {"type": "command", "command": ours}
+    assert not statusline.record_path().exists()
+    assert f"{settings}: status line removed" in install.uninstall(["claude"], cfg, mcp=False)
+    assert "statusLine" not in json.loads(settings.read_text())
+
+    theirs = {"type": "command", "command": "~/.claude/statusline.sh", "padding": 2, "refreshInterval": 10}
+    settings.write_text(json.dumps({"statusLine": theirs, "model": "opus"}))
+    for backup in settings.parent.glob("settings.json.tapin-backup-*"):
+        backup.unlink()
+    messages = install.install(["claude"], cfg, mcp=False)
+
+    assert f"{settings}: status line installed; it runs your previous one (`~/.claude/statusline.sh`) and shows its output" in messages
+    assert json.loads(settings.read_text())["statusLine"] == {"type": "command", "command": ours, "padding": 2, "refreshInterval": 10}
+    assert statusline.load_record() == {"original": theirs}
+    backups = list(settings.parent.glob("settings.json.tapin-backup-*"))
+    assert len(backups) == 1 and json.loads(backups[0].read_text()) == {"statusLine": theirs, "model": "opus"}
+    doctor_ok = f"Claude Code status line in {settings} is Tap In's and runs your previous one (`~/.claude/statusline.sh`)."
+    assert any(status == install.OK and message.startswith(doctor_ok) for status, message in install.doctor(cfg))
+
+    assert f"{settings}: status line already installed" in install.install(["claude"], cfg, mcp=False)
+    assert statusline.load_record() == {"original": theirs}
+
+    assert f"{settings}: status line restored to `~/.claude/statusline.sh`" in install.uninstall(["claude"], cfg, mcp=False)
+    assert json.loads(settings.read_text()) == {"statusLine": theirs, "model": "opus"}
+    assert not statusline.record_path().exists()
+
+
+def test_install_no_statusline_leaves_the_status_line_alone(tmp_path, cfg, exe, launcher):
+    settings = tmp_path / "claude-home" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    theirs = {"type": "command", "command": "echo mine"}
+    settings.write_text(json.dumps({"statusLine": theirs}))
+
+    assert cli.main(["install", "--agents", "claude", "--no-mcp", "--no-statusline"]) == 0
+
+    data = json.loads(settings.read_text())
+    assert data["statusLine"] == theirs
+    assert data["hooks"]["PostToolUse"] == [{"matcher": "*", "hooks": [{"type": "command", "command": f"{launcher} hook claude post-tool-use"}]}]
+    assert not statusline.record_path().exists()
+    warning = (
+        f"Claude Code status line in {settings} is `echo mine`, not Tap In's, so Claude Code gets no usage warnings "
+        "(they need Tap In's status line); run `tapin install`"
+    )
+    assert (install.WARN, warning) in install.doctor(cfg)
+
+
+def _graft(project):
+    (project / ".claude").mkdir(parents=True, exist_ok=True)
+    graft = {"type": "command", "command": "node .claude/helpers/graft-statusline.cjs"}
+    (project / ".claude" / "settings.json").write_text(json.dumps({"statusLine": graft}))
+    return graft
+
+
+def test_project_status_line_is_wrapped_and_restored(tmp_path, cfg, exe, launcher, repo, monkeypatch, capsys):
+    graft = _graft(repo)
+    install.install(["claude"], cfg, mcp=False)
+    monkeypatch.chdir(repo)
+    warning = (
+        install.WARN,
+        f"Claude Code warnings before the limit are off in this project ({Path.cwd()}) because its own status line overrides "
+        "Tap In's; run `tapin statusline --project`",
+    )
+    assert warning in install.doctor(cfg)
+
+    assert cli.main(["statusline", "--project"]) == 0
+    assert "runs this project's own (`node .claude/helpers/graft-statusline.cjs`)" in capsys.readouterr().out
+    local = repo / ".claude" / "settings.local.json"
+    assert json.loads(local.read_text()) == {"statusLine": {"type": "command", "command": f"{launcher} statusline"}}
+    assert statusline.load_record()["projects"] == {str(Path.cwd()): {"original": graft, "created": True}}
+    assert "/.claude/settings.local.json" in (repo / ".git" / "info" / "exclude").read_text().splitlines()
+    assert warning not in install.doctor(cfg)
+    assert cli.main(["statusline", "--project", str(repo)]) == 0
+    assert "already Tap In's and runs `node .claude/helpers/graft-statusline.cjs`" in capsys.readouterr().out
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert cli.main(["statusline", "--project", str(plain)]) == 0
+    assert "sets no status line of its own, so none is needed" in capsys.readouterr().out
+
+    assert cli.main(["statusline", "--project", "--remove"]) == 0
+    assert "status line removed" in capsys.readouterr().out
+    assert not local.exists()
+    assert not statusline.record_path().exists()
+    assert warning in install.doctor(cfg)
+
+
+def test_uninstall_restores_every_wrapped_project(tmp_path, cfg, exe, launcher):
+    install.install(["claude"], cfg, mcp=False)
+    shared = tmp_path / "shared"
+    _graft(shared)
+    local_only = tmp_path / "local-only"
+    (local_only / ".claude").mkdir(parents=True)
+    local_file = local_only / ".claude" / "settings.local.json"
+    mine = {"type": "command", "command": "echo mine", "padding": 1}
+    local_file.write_text(json.dumps({"model": "opus", "statusLine": mine}))
+
+    install.wrap_project_statusline(shared)
+    install.wrap_project_statusline(local_only)
+    assert json.loads(local_file.read_text()) == {"model": "opus", "statusLine": {"type": "command", "command": f"{launcher} statusline", "padding": 1}}
+    assert statusline.load_record()["projects"][str(local_only.resolve())] == {"original": mine, "previous": mine}
+
+    messages = install.uninstall(["claude"], cfg, mcp=False)
+
+    assert not (shared / ".claude" / "settings.local.json").exists()
+    assert json.loads(local_file.read_text()) == {"model": "opus", "statusLine": mine}
+    assert f"{local_only.resolve() / '.claude' / 'settings.local.json'}: status line restored to `echo mine`" in messages
+    assert list(local_file.parent.glob("settings.local.json.tapin-backup-*"))
+    assert not statusline.record_path().exists()
+
+
+GRAFT_CODEX = {"matcher": "Write|Edit|MultiEdit", "hooks": [{"type": "command", "command": "node ~/.codex/hooks/graft/graft-hooks.cjs post-edit"}]}
+
+
+def _positions():
+    return [(event, group, handler) for event, group, handler, _ in install.tapin_hooks("codex")]
+
+
+def _behind_hints(messages):
+    return [message for message in messages if "another tool's hooks before Tap In's" in message]
+
+
+def test_reinstall_keeps_graft_codex_group_before_tapin_and_trust(tmp_path, cfg, exe, launcher):
+    hooks_json = tmp_path / "codex-home" / "hooks.json"
+    hooks_json.parent.mkdir(parents=True)
+    ours = install.desired_hooks("codex", launcher, cfg)
+    fixture = {"hooks": {**ours, "PostToolUse": [GRAFT_CODEX, *ours["PostToolUse"]]}}
+    hooks_json.write_text(json.dumps(fixture))
+    _trust(tmp_path, _current_trust(tmp_path))
+    assert _positions() == [("SessionStart", 0, 0), ("Stop", 0, 0), ("PostToolUse", 1, 0)]
+
+    messages = install.install(["codex"], cfg, mcp=False)
+
+    assert json.loads(hooks_json.read_text()) == fixture
+    assert _positions() == [("SessionStart", 0, 0), ("Stop", 0, 0), ("PostToolUse", 1, 0)]
+    assert install.codex_trust() == {"SessionStart": "trusted", "Stop": "trusted", "PostToolUse": "trusted"}
+    assert _behind_hints(messages) == [
+        f"`PostToolUse` in {hooks_json} has another tool's hooks before Tap In's; if Codex shows Tap In's hook as untrusted in /hooks, trust it again."
+    ]
+
+
+def test_reinstall_keeps_graft_codex_group_appended_after_tapin(tmp_path, cfg, exe, launcher):
+    hooks_json = tmp_path / "codex-home" / "hooks.json"
+    install.install(["codex"], cfg, mcp=False)
+    data = json.loads(hooks_json.read_text())
+    data["hooks"]["PostToolUse"].append(GRAFT_CODEX)
+    hooks_json.write_text(json.dumps(data))
+
+    messages = install.install(["codex"], cfg, mcp=False)
+
+    after = json.loads(hooks_json.read_text())
+    assert after == data and after["hooks"]["PostToolUse"][1] == GRAFT_CODEX
+    assert _positions() == [("SessionStart", 0, 0), ("Stop", 0, 0), ("PostToolUse", 0, 0)]
+    assert _behind_hints(messages) == []
+
+
+def test_claude_install_and_uninstall_keep_graft_hooks(tmp_path, cfg, exe, launcher):
+    def graft(event, **extra):
+        return {**extra, "hooks": [{"type": "command", "command": f"node .claude/helpers/graft-hooks.cjs {event}"}]}
+
+    foreign = {"SessionStart": [graft("session-start")], "UserPromptSubmit": [graft("prompt")], "PostToolUse": [graft("post-edit", matcher="Write|Edit|MultiEdit")]}
+    settings = tmp_path / "claude-home" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"hooks": foreign}))
+    project = tmp_path / "graft-project"
+    _graft(project)
+    project_settings = project / ".claude" / "settings.json"
+    project_settings.write_text(json.dumps({**json.loads(project_settings.read_text()), "hooks": foreign}))
+    project_before = project_settings.read_text()
+
+    install.install(["claude"], cfg, mcp=False)
+    install.wrap_project_statusline(project)
+
+    hooks = json.loads(settings.read_text())["hooks"]
+    for event, groups in foreign.items():
+        assert hooks[event][: len(groups)] == groups
+    assert _commands(hooks["SessionStart"])[-1] == f"{launcher} hook claude session-start"
+    assert _commands(hooks["PostToolUse"])[-1] == f"{launcher} hook claude post-tool-use"
+    assert hooks["UserPromptSubmit"] == foreign["UserPromptSubmit"]
+    assert project_settings.read_text() == project_before
+
+    install.uninstall(["claude"], cfg, mcp=False)
+
+    assert json.loads(settings.read_text()) == {"hooks": foreign}
+    assert project_settings.read_text() == project_before
