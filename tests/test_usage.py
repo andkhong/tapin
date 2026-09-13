@@ -133,6 +133,12 @@ def test_warning_message_names_the_fullest_window_and_local_reset_time():
 
     assert usage.warning_for("claude", "s1", windows, [90, 97], now=now) == (
         "[tapin] Usage warning: this Claude Code account has used 91% of its weekly limit (resets 13:31). You may be "
+        "stopped mid-task soon. Before your next step, record a checkpoint: call the Tap In MCP tool `checkpoint` with "
+        "`session_id` `s1` (or run `tapin checkpoint --session s1`) with what is done, what is in progress (file and "
+        "step), and the exact next step. Then continue the task."
+    )
+    assert usage.warning_for("claude", None, windows, [90, 97], now=now) == (
+        "[tapin] Usage warning: this Claude Code account has used 91% of its weekly limit (resets 13:31). You may be "
         "stopped mid-task soon. Before your next step, record a checkpoint: call the Tap In MCP tool `checkpoint` (or run "
         "`tapin checkpoint`) with what is done, what is in progress (file and step), and the exact next step. Then "
         "continue the task."

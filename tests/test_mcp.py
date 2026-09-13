@@ -4,10 +4,13 @@ import os
 import select
 import subprocess
 import sys
+import time
 
 import pytest
 
 from tapin import __version__, cli, deliver, mcp_server
+from tapin.readers.claude_log import project_dir_name
+from tapin.store import Store
 
 LATEST = mcp_server.PROTOCOL_VERSIONS[0]
 CLIENT_INFO = {"capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}
@@ -43,6 +46,123 @@ def test_tapin_to_uses_mcp_handoff_from_unknown_agent(repo, fake_reader, monkeyp
     assert cli.main(["to", "claude", "--cwd", str(repo)]) == 0
     assert launched["argv"][0] == "claude"
     assert "gemini" in launched["argv"][-1]
+
+
+def test_checkpoint_with_only_the_required_fields_still_works(repo):
+    assert str(repo / ".tapin" / "notes.md") in mcp_server.checkpoint(str(repo), "claude", " Parser done ", "Row tests")
+    [record] = Store(repo).checkpoints()
+    empty = {"model": None, "effort": None, "session_id": None, "in_progress": "", "decisions": ""}
+    assert record == {"at": record["at"], "agent": "claude", "done": "Parser done", "next_steps": "Row tests", **empty}
+
+    schema = mcp_server.input_schema(mcp_server.checkpoint)
+    assert schema["required"] == ["workspace_path", "agent", "summary", "next_steps"]
+    assert schema["properties"]["in_progress"] == {"type": "string", "default": ""}
+    for name in ("session_id", "model", "effort"):
+        assert schema["properties"][name] == {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None}
+    assert "in_progress: the file and step" in mcp_server.tool_definitions()[3]["description"]
+
+
+def _write_jsonl(path, records):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r) + "\n" for r in records))
+
+
+def test_checkpoint_and_create_handoff_fill_in_who_from_the_session_logs(repo, tmp_path):
+    ws = str(repo)
+    reply = {"type": "assistant", "cwd": ws, "effort": "xhigh", "message": {"role": "assistant", "model": "claude-opus-5", "content": []}}
+    synthetic = {"type": "assistant", "cwd": ws, "message": {"role": "assistant", "model": "<synthetic>", "content": []}}
+    _write_jsonl(tmp_path / "claude-home" / "projects" / project_dir_name(repo) / "c-123.jsonl", [{"type": "user", "cwd": ws}, reply, synthetic])
+    rollout = tmp_path / "codex-home" / "sessions" / "2026" / "09" / "13" / "rollout-2026-09-13T10-00-00-x-456.jsonl"
+    turn = {"type": "turn_context", "payload": {"cwd": ws, "model": "gpt-6-astra", "effort": "high"}}
+    _write_jsonl(rollout, [{"type": "session_meta", "payload": {"id": "x-456", "cwd": ws, "model_provider": "openai"}}, turn])
+
+    mcp_server.checkpoint(ws, "claude", "Parser done", "Row tests")
+    mcp_server.checkpoint(ws, "codex", "Retries done", "Backoff test")
+    mcp_server.checkpoint(ws, "claude", "Explicit", "Next", session_id="mine", model="claude-sonnet-5", effort="low")
+    mcp_server.checkpoint(ws, "claude", "Explicit session", "Next", session_id="c-123", effort="max")
+    mcp_server.checkpoint(ws, "claude", "Unknown session", "Next", session_id="gone", model="")
+    mcp_server.checkpoint(ws, "cursor", "Cursor work", "Next")
+    assert [(r["agent"], r["session_id"], r["model"], r["effort"]) for r in Store(repo).checkpoints()] == [
+        ("claude", "c-123", "claude-opus-5", "xhigh"),
+        ("codex", "x-456", "gpt-6-astra", "high"),
+        ("claude", "mine", "claude-sonnet-5", "low"),
+        ("claude", "c-123", "claude-opus-5", "max"),
+        ("claude", "gone", None, None),
+        ("cursor", None, None, None),
+    ]
+
+    mcp_server.create_handoff(ws, "claude", "Stopping mid-parser", "Finish parse_row()")
+    handoff = mcp_server.get_handoff(ws)
+    assert "| From | Claude Code (session `c-123`) |" in handoff
+    assert "| Model | claude-opus-5 (effort xhigh) |" in handoff
+    assert "Recorded by Claude Code (claude-opus-5, effort max) in session `c-123`, just before the stop.\n\n**Done so far:** Explicit session" in handoff
+    assert "_4 other recent checkpoints in .tapin/notes.md are from other sessions and aren't included._" in handoff
+
+
+NO_SESSION = "(no session id: pass session_id so the next handoff from this session includes it)"
+
+
+def _claude_session(tmp_path, repo, session_id, model, effort, seconds_ago):
+    reply = {"type": "assistant", "cwd": str(repo), "effort": effort, "message": {"role": "assistant", "model": model, "content": []}}
+    path = tmp_path / "claude-home" / "projects" / project_dir_name(repo) / f"{session_id}.jsonl"
+    _write_jsonl(path, [{"type": "user", "cwd": str(repo)}, reply])
+    then = time.time() - seconds_ago
+    os.utime(path, (then, then))
+    return path
+
+
+def _last_identity(repo):
+    record = Store(repo).checkpoints()[-1]
+    return record["session_id"], record["model"], record["effort"]
+
+
+def test_checkpoint_infers_the_session_only_when_exactly_one_is_active(repo, tmp_path):
+    ws = str(repo)
+    _claude_session(tmp_path, repo, "old", "claude-sonnet-5", "low", seconds_ago=600)
+    active = _claude_session(tmp_path, repo, "active", "claude-opus-5", "xhigh", seconds_ago=5)
+    saved = mcp_server.checkpoint(ws, "claude", "Parser done", "Row tests")
+    assert saved == f"Checkpoint saved to {repo / '.tapin' / 'notes.md'} (session active)"
+    assert _last_identity(repo) == ("active", "claude-opus-5", "xhigh")
+
+    # A second active session: no session id, and the model and effort only where both sessions agree.
+    _claude_session(tmp_path, repo, "second", "claude-opus-5", "high", seconds_ago=30)
+    assert mcp_server.checkpoint(ws, "claude", "Parser done", "Row tests") == f"Checkpoint saved to {repo / '.tapin' / 'notes.md'} {NO_SESSION}"
+    assert _last_identity(repo) == (None, "claude-opus-5", None)
+    _claude_session(tmp_path, repo, "second", "claude-opus-5", "xhigh", seconds_ago=30)
+    mcp_server.checkpoint(ws, "claude", "Parser done", "Row tests")
+    assert _last_identity(repo) == (None, "claude-opus-5", "xhigh")
+    second = _claude_session(tmp_path, repo, "second", "claude-sonnet-5", "xhigh", seconds_ago=30)
+    mcp_server.checkpoint(ws, "claude", "Parser done", "Row tests")
+    assert _last_identity(repo) == (None, None, None)
+    mcp_server.checkpoint(ws, "claude", "Parser done", "Row tests", model="claude-opus-5")
+    assert _last_identity(repo) == (None, "claude-opus-5", None)
+
+    # No session written within the window.
+    for path in (active, second):
+        os.utime(path, (time.time() - 600, time.time() - 600))
+    assert mcp_server.checkpoint(ws, "claude", "Parser done", "Row tests").endswith(NO_SESSION)
+    assert _last_identity(repo) == (None, None, None)
+
+
+def test_explicit_session_id_is_looked_up_however_old_its_log(repo, tmp_path):
+    _claude_session(tmp_path, repo, "old", "claude-sonnet-5", "low", seconds_ago=3_600)
+    _claude_session(tmp_path, repo, "busy", "claude-opus-5", "xhigh", seconds_ago=5)
+    assert mcp_server.checkpoint(str(repo), "claude", "Parser done", "Row tests", session_id="old").endswith("notes.md (session old)")
+    assert _last_identity(repo) == ("old", "claude-sonnet-5", "low")
+
+
+def test_create_handoff_with_two_active_sessions_records_no_session_so_either_can_claim(repo, tmp_path):
+    ws = str(repo)
+    _claude_session(tmp_path, repo, "c-1", "claude-opus-5", "xhigh", seconds_ago=10)
+    _claude_session(tmp_path, repo, "c-2", "claude-opus-5", "xhigh", seconds_ago=20)
+    store = Store(repo)
+    for claimant in ("c-1", "c-2"):
+        mcp_server.create_handoff(ws, "claude", "Stopping mid-parser", "Finish parse_row()")
+        pending = store.pending()
+        assert pending.from_session is None and store.read_meta(pending.id)["session_id"] is None
+        handoff = store.read_handoff(pending.id)
+        assert "| From | Claude Code |" in handoff and "| Model | claude-opus-5 (effort xhigh) |" in handoff
+        assert "# Handoff from Claude Code" in mcp_server.claim_handoff(ws, "claude", claimant)
 
 
 class StdioServer:

@@ -5,8 +5,9 @@ import sys
 
 import pytest
 
-from tapin import hooks, install
+from tapin import capture, hooks, install
 from tapin.agents.base import StopEvent
+from tapin.readers.claude_log import project_dir_name
 from tapin.store import Store
 
 
@@ -165,3 +166,32 @@ def test_background_capture_runs_through_the_launcher(tmp_path, monkeypatch):
 
     target.unlink()
     assert hooks.capture_argv() == fallback
+
+
+def test_stop_event_json_round_trip_with_and_without_effort(tmp_path):
+    stop = StopEvent(agent="claude", cwd=tmp_path, session_id="s1", model="claude-opus-5", effort="xhigh", stopped_at="2026-09-12T20:00:00Z")
+    assert StopEvent.from_json(stop.to_json()) == stop
+    old = json.loads(stop.to_json())
+    del old["effort"]
+    assert StopEvent.from_json(json.dumps(old)) == StopEvent(**{**old, "cwd": tmp_path})
+
+
+def test_claude_handoff_names_the_model_from_the_log_and_the_effort_from_the_hook(repo, cfg, tmp_path):
+    log = tmp_path / "claude-home" / "projects" / project_dir_name(repo) / "s1.jsonl"
+    log.parent.mkdir(parents=True)
+    records = [
+        {"type": "user", "cwd": str(repo), "message": {"role": "user", "content": "Build the parser"}},
+        {"type": "assistant", "cwd": str(repo), "effort": "xhigh", "message": {"role": "assistant", "model": "claude-opus-5", "content": [{"type": "text", "text": "Writing parse_row()"}]}},
+    ]
+    log.write_text("".join(json.dumps(r) + "\n" for r in records))
+    hooks.handle("claude", "stop-failure", _claude_failure(repo, transcript_path=str(log), effort={"level": "high"}), cfg, background=False)
+
+    store = Store(repo)
+    pending = store.pending()
+    assert "| Model | claude-opus-5 (effort high) |" in store.read_handoff(pending.id)
+    assert (store.read_meta(pending.id)["model"], store.read_meta(pending.id)["effort"]) == ("claude-opus-5", "high")
+    stop, _ = capture.resolve_stop(repo, cfg)
+    assert (stop.model, stop.effort) == ("claude-opus-5", "high")
+
+    brief = hooks.handle("claude", "session-start", {"session_id": "s2", "cwd": str(repo)}, cfg)["hookSpecificOutput"]["additionalContext"]
+    assert "from Claude Code (claude-opus-5, effort high), which stopped at " in brief

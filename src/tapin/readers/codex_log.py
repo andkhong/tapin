@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import os
 import re
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from tapin.md import clip, clip_tail, close_open_fence, code_span, demote_headings, fence, one_line, quote
 from tapin.readers import sections
-from tapin.readers.base import ReaderError, SessionRef, read_jsonl, within
+from tapin.readers.base import ReaderError, SessionRef, last_record, read_jsonl, within
 from tapin.store import iso
 
 META_SCAN_LINES = 200
@@ -86,19 +88,45 @@ def _ref(agent: str, path: Path, meta: _Meta | None = None) -> SessionRef:
     return SessionRef(agent, session_id, path=str(path), cwd=meta.cwd, updated_at=updated)
 
 
+def _workspace_rollouts(workspace: Path, paths: list[Path], since: float | None = None) -> Iterator[tuple[Path, _Meta]]:
+    """The rollouts among `paths` (newest first) of sessions that ran in `workspace`, stopping at the first older than
+    `since`. Each check opens a rollout, so only the newest SCAN_MAX are considered."""
+    for path in paths[:SCAN_MAX]:
+        if since is not None and _mtime(path) < since:
+            return
+        meta = rollout_meta(path)
+        # A subagent's rollout shares the workspace but isn't the session the user was working in.
+        if not meta.subagent and within(meta.cwd, workspace):
+            yield path, meta
+
+
 def _find(agent: str, workspace: Path, session_id: str | None) -> SessionRef | None:
     paths = _rollouts()
     if session_id:
         match = next((p for p in paths if p.stem.endswith(f"-{session_id}")), None)
         match = match or next((p for p in paths[:SCAN_MAX] if rollout_meta(p).id == session_id), None)
         return _ref(agent, match) if match else None
-    # Each check opens a rollout, so only the newest SCAN_MAX are considered.
-    for path in paths[:SCAN_MAX]:
-        meta = rollout_meta(path)
-        # A subagent's rollout shares the workspace but isn't the session the user was working in.
-        if not meta.subagent and within(meta.cwd, workspace):
-            return _ref(agent, path, meta)
+    found = next(_workspace_rollouts(workspace, paths), None)
+    return _ref(agent, *found) if found else None
+
+
+def recent_sessions(agent: str, workspace: Path, window: timedelta) -> list[SessionRef]:
+    """Sessions that ran in `workspace` whose rollout was written within `window` of now, newest first."""
+    since = time.time() - window.total_seconds()
+    return [_ref(agent, path, meta) for path, meta in _workspace_rollouts(workspace, _rollouts(), since)]
+
+
+def _identity(record: dict[str, Any]) -> tuple[str, str | None] | None:
+    payload = record.get("payload") if record.get("type") == "turn_context" else None
+    if isinstance(payload, dict) and _str(payload.get("model")):
+        return payload["model"], _str(payload.get("effort"))
     return None
+
+
+def session_identity(path: Path) -> tuple[str | None, str | None]:
+    """The model and reasoning effort of the latest `turn_context` that names a model, searched from the end of a
+    rollout. (`session_meta` names only the provider.)"""
+    return last_record(path, '"turn_context"', _identity) or (None, None)
 
 
 def _text(content: Any) -> str:

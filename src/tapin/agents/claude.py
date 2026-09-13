@@ -35,6 +35,9 @@ class Claude(Agent):
         # StopFailure's `last_assistant_message` is the API's limit notice, not the agent's last words.
         parts = (payload.get("error_details"), payload.get("last_assistant_message"))
         details = " — ".join(part.strip() for part in parts if isinstance(part, str) and part.strip())
+        # Hook input has no model, but has the reasoning effort as {"level": "high"}.
+        effort = payload.get("effort")
+        level = effort.get("level") if isinstance(effort, dict) else None
         return StopEvent(
             agent=self.name,
             cwd=Path(payload.get("cwd") or os.getcwd()),
@@ -44,6 +47,7 @@ class Claude(Agent):
             details=clip(details, 500) or None,
             last_assistant_message=None,
             stopped_at=iso(utcnow()),
+            effort=level if isinstance(level, str) and level else None,
         )
 
     def plan_text(self, stop: StopEvent) -> str | None:

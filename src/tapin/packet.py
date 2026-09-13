@@ -7,9 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from tapin import agents
 from tapin.agents.base import StopEvent
 from tapin.md import clip, close_open_fence, demote_headings, fence, quote
-from tapin.store import iso, utcnow
+from tapin.store import CheckpointPick, checkpoint_fields, checkpoint_time, iso, parse_utc, utcnow
 from tapin.workspace import Snapshot
 
 _SECRETS = [
@@ -58,6 +59,57 @@ def replace_reason_row(markdown: str, reason: str, details: str | None) -> str:
     return _REASON_ROW.sub(lambda _: row, markdown, count=1)
 
 
+def identity(model: str | None, effort: str | None) -> str:
+    """`claude-opus-5, effort xhigh`, or whichever part is known, or ""."""
+    return ", ".join(filter(None, (model, f"effort {effort}" if effort else None)))
+
+
+def _model_row(model: str | None, effort: str | None) -> str | None:
+    if model and effort:
+        return f"{model} (effort {effort})"
+    return model or (f"effort {effort}" if effort else None)
+
+
+def age(seconds: float) -> str:
+    """Roughly how long `seconds` is: `14 minutes`, `2 hours`, `3 days`, or `just now` under a minute."""
+    seconds = abs(seconds)
+    for unit, size in (("day", 86_400), ("hour", 3_600), ("minute", 60)):
+        if seconds >= size:
+            count = int(seconds // size)
+            return f"{count} {unit}" + ("" if count == 1 else "s")
+    return "just now"
+
+
+def _checkpoint_section(pick: CheckpointPick | None, stopped_at: str) -> list[str]:
+    if pick is None:
+        return []
+    lines: list[str] = []
+    record = pick.record
+    if record is not None:
+        who = identity(record["model"], record["effort"])
+        sentence = f"Recorded by {agents.display(record['agent'] or 'an unnamed agent')}" + (f" ({who})" if who else "")
+        sentence += f" in session `{record['session_id']}`" if record["session_id"] else ""
+        try:
+            seconds = (parse_utc(stopped_at) - checkpoint_time(record)).total_seconds()
+        except (TypeError, ValueError):
+            seconds = None
+        if seconds is not None:
+            side, span = ("before" if seconds >= 0 else "after"), age(seconds)
+            sentence += f", just {side} the stop" if span == "just now" else f", {span} {side} the stop"
+        sentence += "."
+        if not pick.by_session:
+            sentence += " It isn't tied to a session; it was matched by agent and time."
+        lines += ["### Latest checkpoint", "", sentence, ""]
+        if fields := checkpoint_fields(record):
+            lines += [demote_headings("\n\n".join(fields), 3), ""]
+    if pick.others:
+        count = pick.others
+        noun = ("other " if record else "") + ("recent checkpoints" if count > 1 else "recent checkpoint")
+        verb = "are from other sessions and aren't" if count > 1 else "is from another session and isn't"
+        lines += [f"_{count} {noun} in .tapin/notes.md {verb} included._", ""]
+    return lines
+
+
 def _workspace_section(snap: Snapshot) -> list[str]:
     lines = ["## Workspace", ""]
     if not snap.is_git:
@@ -83,7 +135,7 @@ def build(
     digest: str | None,
     digest_error: str | None,
     plan: str | None,
-    note: str | None,
+    checkpoint: CheckpointPick | None,
     cfg: dict[str, Any],
 ) -> Packet:
     stopped_at = stop.stopped_at or iso(utcnow())
@@ -94,7 +146,7 @@ def build(
         git = "not a git repository"
     rows = [
         ("From", from_display + (f" (session `{stop.session_id}`)" if stop.session_id else "")),
-        ("Model", stop.model),
+        ("Model", _model_row(stop.model, stop.effort)),
         ("Stopped", stopped_at),
         ("Reason", _reason(stop.reason, stop.details)),
         ("Workspace", f"`{snap.root}`"),
@@ -113,8 +165,7 @@ def build(
         lines += ["_The stop event carried no final message. See **Last message before the stop** in the session digest below._", ""]
     else:
         lines += ["_No final message was captured. The most recent conversation is in the session digest below._", ""]
-    if note:
-        lines += ["### Latest checkpoint note", "", demote_headings(note, 2), ""]
+    lines += _checkpoint_section(checkpoint, stopped_at)
 
     if plan:
         lines += ["## Plan", "", demote_headings(plan, 2), ""]
@@ -138,6 +189,7 @@ def build(
         "reason": stop.reason,
         "details": stop.details,
         "model": stop.model,
+        "effort": stop.effort,
         "last_assistant_message": redact(stop.last_assistant_message) if stop.last_assistant_message else None,
         "stopped_at": stopped_at,
         "workspace": str(snap.root),
@@ -150,9 +202,10 @@ def build(
 
 def brief(meta: dict[str, Any], handoff_file: Path, max_chars: int) -> str:
     display = meta["from_display"]
+    who = identity(meta.get("model"), meta.get("effort"))
     text = (
-        f"[tapin] You are taking over in-progress work from {display} "
-        f"(stopped {meta['stopped_at']}, reason: {meta['reason']}).\n"
+        f"[tapin] You are taking over in-progress work from {display}{f' ({who})' if who else ''}, "
+        f"which stopped at {meta['stopped_at']} (reason: {meta['reason']}).\n"
         f"Before doing anything else, read the full handoff file: {handoff_file}\n"
         "It has the task history, plan, session digest and workspace diff. Check the workspace, finish the step "
         "that was in progress, and continue the remaining work without redoing finished steps."

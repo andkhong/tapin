@@ -23,10 +23,11 @@ CODEX_LABELS = {300: "5-hour", 10080: "weekly", 43200: "monthly"}
 WARNED_MAX = 50
 MESSAGE = (
     "[tapin] Usage warning: this {agent} account has used {pct}% of its {label} limit{resets}. You may be stopped "
-    "mid-task soon. Before your next step, record a checkpoint: call the Tap In MCP tool `checkpoint` (or run "
-    "`tapin checkpoint`) with what is done, what is in progress (file and step), and the exact next step. Then "
-    "continue the task."
+    "mid-task soon. Before your next step, record a checkpoint: {call} with what is done, what is in progress (file "
+    "and step), and the exact next step. Then continue the task."
 )
+CHECKPOINT_CALL = "call the Tap In MCP tool `checkpoint` (or run `tapin checkpoint`)"
+SESSION_CHECKPOINT_CALL = "call the Tap In MCP tool `checkpoint` with `session_id` `{session_id}` (or run `tapin checkpoint --session {quoted}`)"
 
 Windows = dict[str, dict[str, Any]]
 
@@ -141,7 +142,7 @@ def codex_windows(transcript_path: str | Path | None) -> Windows:
     only. Records whose `rate_limits` is null, or has no primary or secondary window, are skipped."""
     if not transcript_path:
         return {}
-    from tapin.agents.codex import tail_lines
+    from tapin.readers.base import tail_lines
 
     for line in reversed(tail_lines(Path(transcript_path))):
         if '"token_count"' not in line:
@@ -223,11 +224,16 @@ def warning_for(agent: str, session_id: str | None, windows: Windows, thresholds
     if not _first_warning(agent, session_id, f"{name}:{window.get('resets_at')}:{max(crossed):g}"):
         return None
 
+    import shlex
+
     from tapin import agents
 
+    # With the session id, the checkpoint is tied to this session and can't be mistaken for another one's.
+    call = SESSION_CHECKPOINT_CALL.format(session_id=session_id, quoted=shlex.quote(session_id)) if session_id else CHECKPOINT_CALL
     return MESSAGE.format(
-        agent=agents.REGISTRY[agent].display if agent in agents.REGISTRY else agent,
+        agent=agents.display(agent),
         pct=int(used),
         label=window.get("label") or name,
         resets="" if resets_at is None else f" (resets {_reset_time(resets_at, now)})",
+        call=call,
     )

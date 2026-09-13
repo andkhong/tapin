@@ -14,14 +14,14 @@ from pathlib import Path
 from typing import Any
 
 from tapin import __version__, capture, config, workspace
-from tapin.store import Store
+from tapin.store import Store, iso, utcnow
 
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 INSTRUCTIONS = (
     "Tap In passes in-progress work between AI coding agents when one hits a usage limit. "
     "At the start of a session call handoff_status with your workspace path; if a handoff is waiting, "
-    "call claim_handoff and continue from it. Call checkpoint at milestones so another agent can pick up "
-    "if you stop, and create_handoff if you know you are about to stop."
+    "call claim_handoff and continue from it. Call checkpoint at milestones, with what is done, what is in progress "
+    "and your session id, so another agent can pick up if you stop, and create_handoff if you know you are about to stop."
 )
 
 PARSE_ERROR = -32700
@@ -80,20 +80,59 @@ def claim_handoff(workspace_path: str, agent: str, session_id: str | None = None
     return store.read_handoff(pending.id)
 
 
-def checkpoint(workspace_path: str, agent: str, summary: str, next_steps: str, decisions: str = "") -> str:
-    """Record progress for whoever continues this work: what is done, key decisions and why, and the next steps."""
-    store = _store(workspace_path)
-    parts = [f"**Done so far:** {summary}"]
-    if decisions:
-        parts.append(f"**Decisions:** {decisions}")
-    parts.append(f"**Next steps:** {next_steps}")
-    store.append_note(agent, "\n\n".join(parts))
-    return f"Checkpoint saved to {store.notes_path}"
+def checkpoint(
+    workspace_path: str,
+    agent: str,
+    summary: str,
+    next_steps: str,
+    decisions: str = "",
+    in_progress: str = "",
+    session_id: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+) -> str:
+    """Record progress for whoever continues this work if you stop.
+
+    agent: your agent name, e.g. claude, codex or cursor. summary: what is done so far. in_progress: the file and step
+    you are working on now. next_steps: the exact next step. decisions: key decisions and why. Pass session_id whenever
+    you know it, so the next handoff from your session includes this checkpoint. Pass model and effort (your reasoning
+    effort) if you know them; otherwise Tap In fills them in from your session log where it can (Claude Code and Codex)."""
+    root = workspace.find_root(Path(workspace_path).expanduser())
+    store = Store(root)
+    agent = agent.strip()
+    session_id, model, effort = capture.identify(agent, root, session_id or None, model or None, effort or None)
+    store.append_checkpoint(
+        {
+            "at": iso(utcnow()),
+            "agent": agent,
+            "model": model,
+            "effort": effort,
+            "session_id": session_id,
+            "done": summary.strip(),
+            "in_progress": in_progress.strip(),
+            "decisions": decisions.strip(),
+            "next_steps": next_steps.strip(),
+        }
+    )
+    if session_id:
+        return f"Checkpoint saved to {store.notes_path} (session {session_id})"
+    return f"Checkpoint saved to {store.notes_path} (no session id: pass session_id so the next handoff from this session includes it)"
 
 
-def create_handoff(workspace_path: str, agent: str, summary: str, next_steps: str) -> str:
-    """Hand off now, e.g. when you are about to hit a usage limit. Packages your summary with the workspace diff."""
-    store, handoff_id = capture.capture_summary(Path(workspace_path).expanduser(), agent, summary, next_steps, config.load())
+def create_handoff(
+    workspace_path: str,
+    agent: str,
+    summary: str,
+    next_steps: str,
+    session_id: str | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+) -> str:
+    """Hand off now, e.g. when you are about to hit a usage limit. Packages your summary with the workspace diff.
+    Pass session_id, model and effort if you know them; Tap In fills them in for Claude Code and Codex otherwise."""
+    store, handoff_id = capture.capture_summary(
+        Path(workspace_path).expanduser(), agent, summary, next_steps, config.load(), session_id or None, model or None, effort or None
+    )
     return f"Handoff written to {store.handoff_file(handoff_id)}. Another agent can continue with `tapin to <agent>` or by opening this folder."
 
 

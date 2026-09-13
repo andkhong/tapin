@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+import os
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
+
+TAIL_BYTES = 256_000
+T = TypeVar("T")
 
 
 class ReaderError(Exception):
@@ -48,3 +52,47 @@ def read_jsonl(path: Path, max_lines: int | None = None) -> Iterator[dict[str, A
             except ValueError:
                 record = None
             yield record if isinstance(record, dict) else None
+
+
+def tail_lines(path: Path) -> list[str]:
+    """The lines in the last TAIL_BYTES of a file, the first possibly cut off; none if it can't be read."""
+    try:
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - TAIL_BYTES))
+            data = f.read()
+    except OSError:
+        return []
+    return data.decode("utf-8", "replace").splitlines()
+
+
+def last_record(path: Path, marker: str, pick: Callable[[dict[str, Any]], T | None]) -> T | None:
+    """What `pick` returns for the last record of a JSONL log that it accepts, parsing only lines that contain `marker`.
+
+    The end of the file is tried first. A long turn can write more than TAIL_BYTES after the record (a real 4.4 MB Codex
+    rollout's last `turn_context` was 728 KB from the end), so the whole file is read when the end has none. None if
+    there is no such record or the file can't be read."""
+
+    def parse(line: str) -> T | None:
+        if marker not in line:
+            return None
+        try:
+            record = json.loads(line)
+        except ValueError:
+            return None
+        return pick(record) if isinstance(record, dict) else None
+
+    for line in reversed(tail_lines(path)):
+        if (value := parse(line)) is not None:
+            return value
+    found = None
+    try:
+        if path.stat().st_size <= TAIL_BYTES:
+            return None
+        with path.open("rb") as f:
+            for raw in f:
+                if (value := parse(raw.decode("utf-8", "replace"))) is not None:
+                    found = value
+    except OSError:
+        return None
+    return found

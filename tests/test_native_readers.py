@@ -1,11 +1,13 @@
 import json
 import os
 import time
+from datetime import timedelta
 
 from tapin.agents.claude import Claude
 from tapin.agents.codex import Codex, rollout_hit_limit, rollout_limit_error
 from tapin.md import clip_tail
-from tapin.readers import codex_log
+from tapin.readers import base as readers_base
+from tapin.readers import claude_log, codex_log
 from tapin.readers.claude_log import ClaudeLogReader, project_dir_name
 from tapin.readers.codex_log import CodexLogReader
 
@@ -72,6 +74,24 @@ def test_claude_find_session_falls_back_to_recorded_cwd(tmp_path):
     assert ClaudeLogReader().find_session("claude", ws).path == str(path)
 
 
+def test_claude_recent_sessions_are_workspace_logs_written_within_the_window(tmp_path):
+    ws = tmp_path / "repo"
+    older = _claude_log(tmp_path, ws, "older", [_user(ws, "a")])
+    newer = _claude_log(tmp_path, ws / "sub", "newer", [_user(ws / "sub", "b")])
+    stale = _claude_log(tmp_path, ws, "stale", [_user(ws, "c")])
+    dotted = _claude_log(tmp_path, ws, "dotted", [_user(ws, "d")], folder="named-some-other-way")
+    elsewhere = _claude_log(tmp_path, tmp_path / "repo-other", "elsewhere", [_user(tmp_path / "repo-other", "e")])
+    subagent = _jsonl(newer.parent / "newer" / "subagents" / "agent-1.jsonl", [_user(ws, "f")])
+    for path, seconds in ((older, 60), (newer, 10), (stale, 600), (dotted, 30), (elsewhere, 5), (subagent, 1)):
+        _age(path, seconds)
+
+    refs = claude_log.recent_sessions("claude", ws, timedelta(minutes=2))
+    assert [(ref.session_id, ref.path) for ref in refs] == [("newer", str(newer)), ("dotted", str(dotted)), ("older", str(older))]
+    assert [ref.session_id for ref in claude_log.recent_sessions("claude", ws, timedelta(seconds=45))] == ["newer", "dotted"]
+    assert claude_log.recent_sessions("claude", tmp_path / "nowhere", timedelta(minutes=2)) == []
+    assert ClaudeLogReader().find_session("claude", ws).session_id == "newer"
+
+
 def test_claude_digest_keeps_what_the_next_agent_needs(tmp_path):
     ws = tmp_path / "repo"
     records = [
@@ -134,6 +154,34 @@ def test_claude_limit_notice_moves_into_details(cfg):
 
     long = Claude().limit_stop("stop-failure", {**payload, "error_details": None, "last_assistant_message": "x" * 900}, cfg)
     assert len(long.details) == 500 and " — " not in long.details
+    assert stop.effort is None
+    assert Claude().limit_stop("stop-failure", {**payload, "effort": {"level": "xhigh"}}, cfg).effort == "xhigh"
+
+
+def test_claude_session_identity_skips_synthetic_and_sidechain_records(tmp_path, monkeypatch):
+    ws = tmp_path / "repo"
+
+    def reply(model, **extra):
+        return {"type": "assistant", "cwd": str(ws), "message": {"role": "assistant", "model": model, "content": []}, **extra}
+
+    records = [
+        reply("claude-sonnet-5", effort="high"),
+        reply("claude-opus-5", effort="xhigh"),
+        _user(ws, "Keep going"),
+        reply("claude-haiku-5", effort="low", isSidechain=True),
+        reply("<synthetic>", effort="xhigh"),
+    ]
+    path = _claude_log(tmp_path, ws, "s1", records, extra='{"type":"assistant","message":{"model":"claude-')
+    assert claude_log.session_identity(path) == ("claude-opus-5", "xhigh")
+    assert claude_log.session_identity(_claude_log(tmp_path, ws, "s2", [reply("claude-opus-5", effort={"level": "high"})])) == ("claude-opus-5", None)
+    assert claude_log.session_identity(_claude_log(tmp_path, ws, "s3", [reply("<synthetic>"), reply(""), _user(ws, "hi")])) == (None, None)
+    assert claude_log.session_identity(tmp_path / "missing.jsonl") == (None, None)
+    assert claude_log.session_identity(tmp_path) == (None, None)
+
+    # A turn can write more than the tail after its last assistant record.
+    monkeypatch.setattr(readers_base, "TAIL_BYTES", 2_000)
+    long_turn = [reply("claude-opus-5", effort="max"), *[_user(ws, "x" * 500) for _ in range(10)]]
+    assert claude_log.session_identity(_claude_log(tmp_path, ws, "s4", long_turn)) == ("claude-opus-5", "max")
 
 
 def test_claude_stop_names_the_limit_and_when_it_resets(tmp_path):
@@ -199,6 +247,30 @@ def _rollout(tmp_path, stamp, session_id, cwd, records, **meta):
     return _jsonl(path, [head, *records])
 
 
+def test_codex_session_identity_comes_from_the_latest_turn_context(tmp_path, monkeypatch):
+    ws = tmp_path / "repo"
+    records = [
+        {"type": "turn_context", "payload": {"cwd": str(ws), "model": "gpt-6", "effort": "medium"}},
+        _event("task_started"),
+        {"type": "turn_context", "payload": {"cwd": str(ws), "model": "gpt-6-astra", "effort": "high"}},
+        {"type": "turn_context", "payload": {"cwd": str(ws)}},
+        _event("task_complete", last_agent_message="Done."),
+    ]
+    path = _rollout(tmp_path, "10-00-00", "x1", ws, records, model_provider="openai")
+    assert codex_log.session_identity(path) == ("gpt-6-astra", "high")
+    no_effort = _jsonl(tmp_path / "no-effort.jsonl", [{"type": "turn_context", "payload": {"model": "gpt-6-astra", "effort": None}}])
+    assert codex_log.session_identity(no_effort) == ("gpt-6-astra", None)
+    assert codex_log.session_identity(_rollout(tmp_path, "11-00-00", "x2", ws, [], model_provider="openai")) == (None, None)
+    assert codex_log.session_identity(tmp_path / "missing.jsonl") == (None, None)
+    assert codex_log.session_identity(tmp_path) == (None, None)
+
+    # A real 4.4 MB rollout's last turn_context was 728 KB before the end, well outside the tail.
+    monkeypatch.setattr(readers_base, "TAIL_BYTES", 2_000)
+    long_turn = [{"type": "turn_context", "payload": {"model": "gpt-6-astra", "effort": "xhigh"}}]
+    long_turn += [_event("agent_message", message="y" * 500) for _ in range(10)]
+    assert codex_log.session_identity(_jsonl(tmp_path / "long-turn.jsonl", long_turn)) == ("gpt-6-astra", "xhigh")
+
+
 def test_codex_find_session_by_cwd_and_id(tmp_path):
     ws = tmp_path / "repo"
     older = _rollout(tmp_path, "10-00-00", "aaa-1", ws, [])
@@ -220,6 +292,22 @@ def test_codex_find_session_by_cwd_and_id(tmp_path):
     assert reader.find_session("codex", tmp_path / "nowhere", "eee-5").path == str(renamed)
     assert reader.find_session("codex", tmp_path / "late").session_id == "eee-5"
     assert reader.find_session("codex", tmp_path / "nowhere") is None
+
+
+def test_codex_recent_sessions_skip_subagents_other_workspaces_and_old_rollouts(tmp_path, monkeypatch):
+    ws = tmp_path / "repo"
+    first = _rollout(tmp_path, "10-00-00", "aaa-1", ws, [])
+    second = _rollout(tmp_path, "11-00-00", "bbb-2", ws / "pkg", [])
+    child = _rollout(tmp_path, "12-00-00", "ccc-3", ws, [], thread_source="subagent", parent_thread_id="bbb-2")
+    other = _rollout(tmp_path, "13-00-00", "ddd-4", tmp_path / "other", [])
+    old = _rollout(tmp_path, "09-00-00", "eee-5", ws, [])
+    for path, seconds in ((first, 50), (second, 20), (child, 5), (other, 1), (old, 600)):
+        _age(path, seconds)
+
+    refs = codex_log.recent_sessions("codex", ws, timedelta(minutes=2))
+    assert [(ref.session_id, ref.path) for ref in refs] == [("bbb-2", str(second)), ("aaa-1", str(first))]
+    monkeypatch.setattr(codex_log, "SCAN_MAX", 3)
+    assert [ref.session_id for ref in codex_log.recent_sessions("codex", ws, timedelta(minutes=2))] == ["bbb-2"]
 
 
 def test_codex_digest_keeps_plan_answer_failures_and_stop(tmp_path):

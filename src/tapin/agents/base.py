@@ -20,6 +20,7 @@ class StopEvent:
     last_assistant_message: str | None = None
     model: str | None = None
     stopped_at: str | None = None
+    effort: str | None = None
 
     def to_json(self) -> str:
         return json.dumps({**asdict(self), "cwd": str(self.cwd)})

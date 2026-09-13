@@ -40,6 +40,8 @@ Other tools convert a session when you ask, and one hands off from Claude Code a
 
 A handoff mixes evidence with the previous agent's own account. The git status and diff show the real state of the repository. The last message and the conversation show what the agent believed it had done. The handoff tells the next agent to treat those statements as unverified, and to check the workspace before editing.
 
+The header names the model and reasoning effort behind the stopped session, and the latest checkpoint from that same session says what was done, what was in progress and the next step, who recorded it, and how long before the stop.
+
 The workspace section (the diff plus new untracked files) is capped at 20,000 characters and the session digest at 12,000, and common secret formats are redacted before the file is written.
 
 ## Install
@@ -154,10 +156,10 @@ The first new session to start in the folder claims the handoff, and later sessi
 A capture after the stop can rebuild almost everything from disk, except what the agent was about to do next. So when an agent gets close to a usage limit, Tap In tells it, in its own context, to record a checkpoint while it can still respond:
 
 ```text
-[tapin] Usage warning: this Codex account has used 97% of its 5-hour limit (resets 14:28). You may be stopped mid-task soon. Before your next step, record a checkpoint: call the Tap In MCP tool `checkpoint` (or run `tapin checkpoint`) with what is done, what is in progress (file and step), and the exact next step. Then continue the task.
+[tapin] Usage warning: this Codex account has used 97% of its 5-hour limit (resets 14:28). You may be stopped mid-task soon. Before your next step, record a checkpoint: call the Tap In MCP tool `checkpoint` with `session_id` `019d4b2e-5c1f-7a38-9e60-3b7f1c2d8a45` (or run `tapin checkpoint --session 019d4b2e-5c1f-7a38-9e60-3b7f1c2d8a45`) with what is done, what is in progress (file and step), and the exact next step. Then continue the task.
 ```
 
-The latest checkpoint goes into the next handoff. Each warning is given once per limit window and threshold.
+The checkpoint is tied to that session and goes into its next handoff. Each warning is given once per limit window and threshold.
 
 - **Claude Code** reports usage only to its status line, and only on a Pro or Max plan. `tapin install` sets Tap In's status line, which saves the numbers for the `PostToolUse` hook to read. If you already have a status line, Tap In's runs yours and shows its output unchanged, and `tapin uninstall` puts yours back.
 - **Codex** records usage in its session log. After each tool call, the `PostToolUse` hook reads the end of that log. Trust the hook in `/hooks` first.
@@ -188,10 +190,10 @@ Any agent that supports MCP can use the Tap In MCP server, with or without an ad
 | `handoff_status` | Shows whether a handoff is waiting in this workspace |
 | `get_handoff` | Reads a handoff without claiming it |
 | `claim_handoff` | Claims the waiting handoff so no other session takes it |
-| `checkpoint` | Records progress, decisions and next steps; the latest one is included in the next handoff |
+| `checkpoint` | Records what is done, what is in progress, decisions and next steps, with the session, model and reasoning effort (filled in from the session log for Claude Code and Codex); the latest one from the same session goes into its next handoff |
 | `create_handoff` | Writes a handoff now, for example when an agent knows it is about to stop |
 
-Agents without MCP can record a checkpoint from the shell with `tapin checkpoint --agent <name> --summary "..." --next-steps "..."` (plus `--decisions` and `--workspace` if needed), which writes the same note as the MCP tool, and can use the plain file format described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+Agents without MCP can record a checkpoint from the shell with `tapin checkpoint --agent <name> --summary "..." --in-progress "..." --next-steps "..."` (plus `--decisions`, `--session`, `--model`, `--effort` and `--workspace` if needed), which writes the same note as the MCP tool, and can use the plain file format described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## Handoff files
 
@@ -202,7 +204,8 @@ Agents without MCP can record a checkpoint from the shell with `tapin checkpoint
     20260912T222249Z-codex/
       handoff.md                  what the next agent reads
       meta.json                   stop details: agent, session, reason, git branch and HEAD
-  notes.md                        checkpoints written through MCP or `tapin checkpoint`
+  checkpoints.jsonl               checkpoints written through MCP or `tapin checkpoint`
+  notes.md                        the same checkpoints, readable
   journal/                        Cursor activity recorded by hooks
 ```
 
@@ -261,6 +264,7 @@ command = ["/Applications/ChatGPT.app/Contents/Resources/codex"]
 | `limit_message_pattern` | usage/rate limit, quota, 429 | Which Cursor error messages count as a limit |
 | `diff_max_chars` / `digest_max_chars` | `20000` / `12000` | Size caps for the workspace section (diff plus new untracked files) and the session digest |
 | `brief_max_chars` | `3500` | Size of the note injected when a session starts |
+| `checkpoint_max_age_hours` | `12` | How long before the stop a checkpoint recorded without a session id can be and still go into a handoff. A checkpoint from the same session is included however old |
 | `warn_thresholds` | `[90, 97]` | Usage percentages at which Claude Code and Codex are told to record a checkpoint before a limit. `[]` turns the warnings off |
 | `agents.<name>.command` | `claude`, `codex`, `cursor agent` | How `tapin to` launches each agent |
 | `readers.<name>` | `claude-log`, `codex-log`, `journal` for Cursor | How each agent's session is read. `continues` is an optional alternative for Claude Code and Codex that needs Node.js |

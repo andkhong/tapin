@@ -26,7 +26,7 @@ SNIPPET_END = "<!-- tapin:end -->"
 SNIPPET = f"""{SNIPPET_BEGIN}
 ## Tap In handoffs
 - If `.tapin/pending.json` in the workspace names an unclaimed handoff, another agent stopped mid-task. Read `.tapin/handoffs/<id>/handoff.md` (or call the `claim_handoff` MCP tool) before starting, and continue from where it stopped.
-- At milestones (a design decision, a finished step, before a long operation), call the `checkpoint` MCP tool with what is done, key decisions and the next steps, so another agent can continue if you hit a usage limit.
+- At milestones (a design decision, a finished step, before a long operation), call the `checkpoint` MCP tool with what is done, what is in progress (file and step), key decisions, the next steps and your session id, so another agent can continue if you hit a usage limit.
 {SNIPPET_END}
 """
 CURSOR_EVENTS = {

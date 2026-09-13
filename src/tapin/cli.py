@@ -162,7 +162,18 @@ def cmd_statusline(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
 def cmd_checkpoint(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     from tapin import mcp_server
 
-    print(mcp_server.checkpoint(str(args.workspace), args.agent, args.summary, args.next_steps, args.decisions))
+    saved = mcp_server.checkpoint(
+        str(args.workspace),
+        args.agent,
+        args.summary,
+        args.next_steps,
+        decisions=args.decisions,
+        in_progress=args.in_progress,
+        session_id=args.session,
+        model=args.model,
+        effort=args.effort,
+    )
+    print(saved)
     return 0
 
 
@@ -271,9 +282,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("checkpoint", help="record progress for whoever continues this work (the MCP checkpoint tool, from the shell)")
     p.add_argument("--agent", required=True, help="the agent recording it, e.g. claude or codex")
-    p.add_argument("--summary", required=True, help="what is done so far, and what is in progress (file and step)")
+    p.add_argument("--summary", required=True, help="what is done so far")
+    p.add_argument("--in-progress", default="", help="the file and step being worked on")
     p.add_argument("--next-steps", required=True, help="the exact next step")
     p.add_argument("--decisions", default="", help="key decisions and why")
+    p.add_argument("--session", help="the session recording it (default for claude and codex: the only one active in the workspace, if just one is)")
+    p.add_argument("--model", help="the model (default for claude and codex: read from the session log)")
+    p.add_argument("--effort", help="the reasoning effort (default for claude and codex: read from the session log)")
     p.add_argument("--workspace", type=Path, default=Path.cwd())
     p.set_defaults(func=cmd_checkpoint)
 

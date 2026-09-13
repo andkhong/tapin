@@ -18,6 +18,8 @@ DEFAULTS: dict[str, Any] = {
     "limit_message_pattern": r"(usage|rate)[ _-]?limit|quota|too many requests|\b429\b",
     # Usage percentages at which a Claude Code or Codex agent is told to record a checkpoint; [] turns warnings off.
     "warn_thresholds": [90, 97],
+    # How old a checkpoint recorded without a session id can be, relative to the stop, and still go into a handoff.
+    "checkpoint_max_age_hours": 12,
     # Which reader summarizes each agent's session. `claude-log` and `codex-log` read Claude Code's and Codex's
     # own session logs and need nothing installed; `journal` renders what Tap In's own hooks recorded (Cursor).
     # `continues` (npm, needs Node.js) is optional and can be chosen for Claude Code or Codex instead.

@@ -14,4 +14,9 @@ def get(name: str) -> Agent:
         raise ValueError(f"unknown agent {name!r}; expected one of: {', '.join(NAMES)}") from None
 
 
-__all__ = ["NAMES", "REGISTRY", "Agent", "StartEvent", "StopEvent", "get"]
+def display(name: str) -> str:
+    """The agent's product name, or the name as given for an agent Tap In has no adapter for."""
+    return REGISTRY[name].display if name in REGISTRY else name
+
+
+__all__ = ["NAMES", "REGISTRY", "Agent", "StartEvent", "StopEvent", "display", "get"]

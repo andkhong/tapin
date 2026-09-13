@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import os
 import re
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from tapin.md import clip, clip_tail, code_span, fence, one_line, quote
 from tapin.readers import sections
-from tapin.readers.base import ReaderError, SessionRef, read_jsonl, within
+from tapin.readers.base import ReaderError, SessionRef, last_record, read_jsonl, within
 from tapin.store import iso
 
 CWD_SCAN_LINES = 200
@@ -77,27 +79,64 @@ def _ref(agent: str, path: Path) -> SessionRef:
     return SessionRef(agent, path.stem, path=str(path), cwd=session_cwd(path), updated_at=updated)
 
 
+def _recorded_in(paths: list[Path], workspace: Path, since: float | None) -> Iterator[Path]:
+    """The logs among `paths` (newest first) whose session ran in `workspace`, stopping at the first older than `since`."""
+    for path in paths:
+        if since is not None and _mtime(path) < since:
+            return
+        if within(session_cwd(path), workspace):
+            yield path
+
+
+def _workspace_logs(workspace: Path, since: float | None = None) -> Iterator[Path]:
+    """Top-level logs of sessions that ran in `workspace`, in the order find_session prefers them: newest first in the
+    folders named after it, then newest first in other folders. With `since`, only logs written at or after it."""
+    dirs = _subdirs(projects_dir())
+    prefixes = {project_dir_name(workspace), project_dir_name(workspace.resolve())}
+    named = [d for d in dirs if any(d.name == p or d.name.startswith(p + "-") for p in prefixes)]
+    yield from _recorded_in(_newest_first(named), workspace, since)
+    # Folder names for paths with dots or underscores are unverified, so also match other folders by recorded cwd.
+    others = [d for d in dirs if d not in named and (since is None or _written_since(d, since)) and within(_folder_cwd(d), workspace)]
+    yield from _recorded_in(_newest_first(others), workspace, since)
+
+
+def _written_since(directory: Path, since: float) -> bool:
+    return any(_mtime(path) >= since for path in directory.glob("*.jsonl"))
+
+
 def _find(agent: str, workspace: Path, session_id: str | None) -> SessionRef | None:
-    root = projects_dir()
-    dirs = _subdirs(root)
     if session_id:
         name = f"{session_id}.jsonl"
         if Path(name).name != name:
             return None
-        paths = [d / name for d in dirs if (d / name).is_file()]
+        paths = [d / name for d in _subdirs(projects_dir()) if (d / name).is_file()]
         return _ref(agent, max(paths, key=_mtime)) if paths else None
+    path = next(_workspace_logs(workspace), None)
+    return _ref(agent, path) if path else None
 
-    prefixes = {project_dir_name(workspace), project_dir_name(workspace.resolve())}
-    named = [d for d in dirs if any(d.name == p or d.name.startswith(p + "-") for p in prefixes)]
-    for path in _newest_first(named):
-        if within(session_cwd(path), workspace):
-            return _ref(agent, path)
-    # Folder names for paths with dots or underscores are unverified, so also match other folders by recorded cwd.
-    others = [d for d in dirs if d not in named and within(_folder_cwd(d), workspace)]
-    for path in _newest_first(others):
-        if within(session_cwd(path), workspace):
-            return _ref(agent, path)
+
+def recent_sessions(agent: str, workspace: Path, window: timedelta) -> list[SessionRef]:
+    """Sessions that ran in `workspace` whose log was written within `window` of now, newest first."""
+    since = time.time() - window.total_seconds()
+    return [_ref(agent, path) for path in sorted(_workspace_logs(workspace, since), key=_mtime, reverse=True)]
+
+
+def _identity(record: dict[str, Any]) -> tuple[str, str | None] | None:
+    if record.get("type") != "assistant" or record.get("isSidechain"):
+        return None
+    message = record.get("message")
+    model = message.get("model") if isinstance(message, dict) else None
+    if isinstance(model, str) and model and model != "<synthetic>":
+        return model, _str(record.get("effort"))
     return None
+
+
+def session_identity(path: Path) -> tuple[str | None, str | None]:
+    """The model and reasoning effort of the latest assistant response in a session log, searched from the end.
+
+    Each assistant record has `message.model` and a top-level `effort`. Records with the model `<synthetic>` weren't
+    written by a model, and sidechain records can come from a subagent on another model, so both are skipped."""
+    return last_record(path, '"assistant"', _identity) or (None, None)
 
 
 def _str(value: Any) -> str | None:

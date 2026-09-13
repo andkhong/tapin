@@ -17,18 +17,6 @@ LIMIT_CODES = (
     "quota_exceeded",
     "usage limit",
 )
-TAIL_BYTES = 256_000
-
-
-def tail_lines(path: Path) -> list[str]:
-    try:
-        with path.open("rb") as f:
-            f.seek(0, os.SEEK_END)
-            f.seek(max(0, f.tell() - TAIL_BYTES))
-            data = f.read()
-    except OSError:
-        return []
-    return data.decode("utf-8", "replace").splitlines()
 
 
 def _mentions_limit(value: object) -> bool:
@@ -41,6 +29,9 @@ def rollout_limit_error(path: Path) -> str | None:
 
     Codex 0.154 ends such a turn with a `task_complete` whose `error` is
     {"codex_error_info": "usage_limit_exceeded", "message": ...}; records can follow it in the same file."""
+    # Imported here: every hook loads this module, and journal hooks must not load the readers.
+    from tapin.readers.base import tail_lines
+
     for line in reversed(tail_lines(path)):
         try:
             record = json.loads(line)

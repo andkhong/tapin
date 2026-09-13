@@ -100,14 +100,34 @@ def test_journal_hook_loads_no_argparse_config_parser_or_capture_modules(repo):
 
 
 def test_checkpoint_command_writes_the_note_the_mcp_tool_would(repo, capsys):
-    argv = ["checkpoint", "--agent", "codex", "--summary", "Parser done; retry loop half written in fetch.py"]
+    argv = ["checkpoint", "--agent", "codex", "--summary", "Parser done", "--in-progress", "fetch.py: retry loop half written"]
     argv += ["--next-steps", "Add the backoff test", "--decisions", "Keep it synchronous", "--workspace", str(repo)]
+    argv += ["--session", "x1", "--model", "gpt-6-astra", "--effort", "high"]
     assert cli.main(argv) == 0
     out = capsys.readouterr().out.strip()
-    assert out.startswith("Checkpoint saved to ") and out.endswith("/.tapin/notes.md")
+    assert out.startswith("Checkpoint saved to ") and out.endswith("/.tapin/notes.md (session x1)")
 
-    note = Store(repo).latest_note()
-    assert note.splitlines()[0].startswith("## ") and note.splitlines()[0].endswith(" — codex")
-    assert note.endswith(
-        "**Done so far:** Parser done; retry loop half written in fetch.py\n\n**Decisions:** Keep it synchronous\n\n**Next steps:** Add the backoff test"
+    store = Store(repo)
+    [record] = store.checkpoints()
+    assert record == {
+        "at": record["at"],
+        "agent": "codex",
+        "model": "gpt-6-astra",
+        "effort": "high",
+        "session_id": "x1",
+        "done": "Parser done",
+        "in_progress": "fetch.py: retry loop half written",
+        "decisions": "Keep it synchronous",
+        "next_steps": "Add the backoff test",
+    }
+    assert store.latest_note() == (
+        f"## {record['at']} — Codex · gpt-6-astra (effort high) · session `x1`\n\n**Done so far:** Parser done\n\n"
+        "**In progress:** fetch.py: retry loop half written\n\n**Decisions:** Keep it synchronous\n\n**Next steps:** Add the backoff test"
     )
+
+    assert cli.main(["checkpoint", "--agent", "codex", "--summary", "Tests pass", "--next-steps", "Open a PR", "--workspace", str(repo)]) == 0
+    no_session = "/.tapin/notes.md (no session id: pass session_id so the next handoff from this session includes it)"
+    assert capsys.readouterr().out.strip().endswith(no_session)
+    latest = store.checkpoints()[-1]
+    assert (latest["session_id"], latest["model"], latest["effort"], latest["in_progress"], latest["decisions"]) == (None, None, None, "", "")
+    assert store.latest_note() == f"## {latest['at']} — Codex\n\n**Done so far:** Tests pass\n\n**Next steps:** Open a PR"
