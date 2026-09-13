@@ -16,11 +16,12 @@ from tapin.store import Store
 
 def cmd_capture(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     root = workspace.find_root(args.cwd)
-    stop = capture.resolve_stop(root, cfg, source=args.source, session_id=args.session, reason=args.reason)
-    if stop is None:
+    resolved = capture.resolve_stop(root, cfg, source=args.source, session_id=args.session, reason=args.reason)
+    if resolved is None:
         print(f"No agent session found for {root}. Pass --from and --session.", file=sys.stderr)
         return 1
-    store, handoff_id = capture.capture(stop, cfg)
+    stop, ref = resolved
+    store, handoff_id = capture.capture(stop, cfg, ref=ref)
     print(store.handoff_file(handoff_id))
     return 0
 
@@ -28,19 +29,20 @@ def cmd_capture(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
 def cmd_to(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     root = workspace.find_root(args.cwd)
     target = agents.get(args.target)
-    stop = capture.resolve_stop(
+    resolved = capture.resolve_stop(
         root, cfg, source=args.source, session_id=args.session, exclude=None if args.source else target.name
     )
-    if stop is None:
+    if resolved is None:
         print(f"No session from another agent found for {root}. Pass --from.", file=sys.stderr)
         return 1
+    stop, ref = resolved
 
     pending = Store(root).claimable()
     if stop.agent not in agents.REGISTRY and pending:
         # Written through MCP by an agent Tap In has no log reader for; nothing to re-read.
         store, handoff_id = Store(root), pending.id
     else:
-        store, handoff_id = capture.capture(stop, cfg)
+        store, handoff_id = capture.capture(stop, cfg, ref=ref)
     handoff_file = store.handoff_file(handoff_id)
     prompt = packet.launch_prompt(store.read_meta(handoff_id), handoff_file)
     argv = target.launch_argv(prompt, cfg)
@@ -101,7 +103,13 @@ def cmd_hook(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
 
 
 def cmd_capture_event(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
-    hooks.run_capture(StopEvent.from_json(sys.stdin.read()), cfg)
+    stop = None
+    try:
+        stop = StopEvent.from_json(sys.stdin.read())
+        hooks.run_capture(stop, cfg)
+    except Exception:
+        hooks.log_exception(stop.agent if stop else "unknown", "capture-event")
+        return 1
     return 0
 
 

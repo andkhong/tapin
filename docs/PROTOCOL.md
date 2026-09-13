@@ -31,7 +31,7 @@ All state lives in the workspace (the git top level, or the working directory ou
 }
 ```
 
-A handoff is **claimable** when `claimed_by` is null and `expires_at` is in the future.
+A handoff is **claimable** when `claimed_by` is null, `created_at` is not in the future, and now is before both `expires_at` and `created_at` plus `MAX_TTL_HOURS` (7 days), so a file that asks for a longer life is capped at that.
 
 ## Claiming
 
@@ -41,6 +41,8 @@ A handoff is **claimable** when `claimed_by` is null and `expires_at` is in the 
 4. Release the lock and read `handoffs/<id>/handoff.md` in full.
 
 Only one session wins. Others see `claimed_by` and move on.
+
+Nothing is claimed when `.tapin/` is tracked by git, since a cloned repository would otherwise hand you instructions committed by a stranger.
 
 ## handoff.md sections
 

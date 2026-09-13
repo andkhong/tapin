@@ -1,6 +1,6 @@
 import json
 
-from tapin import install
+from tapin import agents, install
 
 EXE = "/opt/bin/tapin"
 ALL = ["claude", "codex", "cursor"]
@@ -38,6 +38,11 @@ def test_install_is_idempotent_and_uninstall_restores(tmp_path, cfg, monkeypatch
     install.uninstall(ALL, cfg, mcp=False)
     assert json.loads(settings.read_text()) == original
     assert "hooks" not in json.loads((tmp_path / "cursor-home" / "hooks.json").read_text())
+
+
+def test_hook_pattern_matches_every_agent():
+    assert all(install.OURS.search(f"{EXE} hook {name} stop") for name in agents.NAMES)
+    assert not install.OURS.search(f"{EXE} hook gemini stop")
 
 
 def test_cursor_mcp_registration(tmp_path, cfg, monkeypatch):

@@ -14,6 +14,7 @@ from tapin.md import clip
 from tapin.store import Store, iso, utcnow
 
 DUPLICATE_WINDOW = timedelta(minutes=2)
+REFINE_WAIT = timedelta(seconds=2)
 JOURNAL_EVENTS = ("before-submit-prompt", "after-agent-response", "after-file-edit", "after-shell-execution")
 JOURNAL_OUTPUT_MAX = 4_000
 
@@ -35,6 +36,8 @@ def handle(agent_name: str, event: str, payload: dict[str, Any], cfg: dict[str, 
             spawn_capture(stop)
         else:
             run_capture(stop, cfg)
+    else:
+        capture.refine_reason(store, stop, REFINE_WAIT if background else timedelta(0))
     return {}
 
 

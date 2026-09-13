@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,9 @@ def _reader(agent: str, cfg: dict[str, Any]) -> Reader:
     return readers.get(cfg["readers"][agent], cfg)
 
 
-def capture(stop: StopEvent, cfg: dict[str, Any], reader: Reader | None = None) -> tuple[Store, str]:
+def capture(
+    stop: StopEvent, cfg: dict[str, Any], reader: Reader | None = None, ref: SessionRef | None = None
+) -> tuple[Store, str]:
     root = workspace.find_root(stop.cwd)
     store = Store(root)
     agent = agents.get(stop.agent)
@@ -26,7 +29,7 @@ def capture(stop: StopEvent, cfg: dict[str, Any], reader: Reader | None = None) 
 
     digest = digest_error = None
     try:
-        ref = reader.find_session(stop.agent, root, stop.session_id)
+        ref = ref or reader.find_session(stop.agent, root, stop.session_id)
         if ref is None and stop.session_id:
             ref = SessionRef(stop.agent, stop.session_id, path=stop.transcript_path)
         if ref is not None:
@@ -50,6 +53,29 @@ def capture(stop: StopEvent, cfg: dict[str, Any], reader: Reader | None = None) 
     workspace.ensure_excluded(root)
     handoff_id = store.create_handoff(stop.agent, built.markdown, built.meta, cfg["handoff_ttl_hours"])
     return store, handoff_id
+
+
+def refine_reason(store: Store, stop: StopEvent, wait: timedelta = timedelta(0)) -> bool:
+    """Fill in what a duplicate stop event knows and the handoff already written doesn't: Cursor's `stop`
+    says only that the turn failed, and the `session-end` that follows says why. `wait` gives a capture
+    still running in the background time to write that handoff first."""
+    if not stop.details:
+        return False
+    deadline = time.monotonic() + wait.total_seconds()
+    while True:
+        with store.lock():
+            pending = store.pending()
+            if pending and pending.from_agent == stop.agent and pending.from_session == stop.session_id:
+                meta = store.read_meta(pending.id)
+                if meta.get("details"):
+                    return False
+                store.write_meta(pending.id, {**meta, "reason": stop.reason, "details": stop.details})
+                path = store.handoff_file(pending.id)
+                path.write_text(packet.replace_reason_row(path.read_text(), stop.reason, stop.details))
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
 
 
 def capture_summary(cwd: Path, agent_label: str, summary: str, next_steps: str, cfg: dict[str, Any]) -> tuple[Store, str]:
@@ -85,8 +111,10 @@ def resolve_stop(
     session_id: str | None = None,
     exclude: str | None = None,
     reason: str = "manual",
-) -> StopEvent | None:
-    """Work out which session to hand off: an unclaimed hook capture first, else the newest session here."""
+) -> tuple[StopEvent, SessionRef | None] | None:
+    """Work out which session to hand off: an unclaimed hook capture first, else the newest session here.
+
+    Returns the session it found with it, so the caller's capture doesn't look the same session up again."""
     pending = Store(root).claimable()
     if (
         pending
@@ -95,7 +123,7 @@ def resolve_stop(
         and pending.from_agent != exclude
     ):
         meta = Store(root).read_meta(pending.id)
-        return StopEvent(
+        stop = StopEvent(
             agent=pending.from_agent,
             cwd=root,
             session_id=meta.get("session_id"),
@@ -106,6 +134,7 @@ def resolve_stop(
             model=meta.get("model"),
             stopped_at=meta.get("stopped_at"),
         )
+        return stop, None
 
     names = [source] if source else [name for name in agents.NAMES if name != exclude]
     refs: list[SessionRef] = []
@@ -119,11 +148,11 @@ def resolve_stop(
 
     if not refs:
         if source and session_id:
-            return StopEvent(agent=source, cwd=root, session_id=session_id, reason=reason)
+            return StopEvent(agent=source, cwd=root, session_id=session_id, reason=reason), None
         return None
     oldest = datetime.min.replace(tzinfo=timezone.utc)
     ref = max(refs, key=lambda r: parse_iso(r.updated_at) if r.updated_at else oldest)
-    return StopEvent(
+    stop = StopEvent(
         agent=ref.agent,
         cwd=root,
         session_id=ref.session_id,
@@ -131,3 +160,4 @@ def resolve_stop(
         reason=reason,
         stopped_at=ref.updated_at,
     )
+    return stop, ref

@@ -22,6 +22,8 @@ _SECRETS = [
     (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]{20,}=*"), r"\1[REDACTED]"),
 ]
 
+_REASON_ROW = re.compile(r"^\| Reason \|.*$", re.MULTILINE)
+
 HOW_TO_CONTINUE = """\
 1. Read this whole file before acting.
 2. Check that the workspace still matches the **Workspace** section (`git status`, `git diff`); files may have changed since.
@@ -44,6 +46,16 @@ def redact(text: str) -> str:
 
 def _cell(value: object) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
+
+
+def _reason(reason: str, details: str | None) -> str:
+    return reason + (f" — {details}" if details else "")
+
+
+def replace_reason_row(markdown: str, reason: str, details: str | None) -> str:
+    """Rewrite the header row when a later hook event reveals why the agent really stopped."""
+    row = f"| Reason | {_cell(_reason(reason, details))} |"
+    return _REASON_ROW.sub(lambda _: row, markdown, count=1)
 
 
 def _workspace_section(snap: Snapshot) -> list[str]:
@@ -84,7 +96,7 @@ def build(
         ("From", from_display + (f" (session `{stop.session_id}`)" if stop.session_id else "")),
         ("Model", stop.model),
         ("Stopped", stopped_at),
-        ("Reason", stop.reason + (f" — {stop.details}" if stop.details else "")),
+        ("Reason", _reason(stop.reason, stop.details)),
         ("Workspace", f"`{snap.root}`"),
         ("Git", git),
         ("Session log", f"`{stop.transcript_path}`" if stop.transcript_path else None),

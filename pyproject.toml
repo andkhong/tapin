@@ -2,7 +2,7 @@
 name = "tapin"
 version = "0.1.0"
 description = "Hand off in-progress work between AI coding agents when one hits its rate limit"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = ["mcp>=2.2,<3"]
 
 [project.scripts]

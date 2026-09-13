@@ -15,7 +15,7 @@ from typing import Any
 from tapin import agents, config
 from tapin.store import utcnow
 
-OURS = re.compile(r"tapin'? hook (?:claude|codex|cursor) ")
+OURS = re.compile(rf"tapin'? hook (?:{'|'.join(re.escape(name) for name in agents.NAMES)}) ")
 SNIPPET_BEGIN = "<!-- tapin:begin -->"
 SNIPPET_END = "<!-- tapin:end -->"
 SNIPPET = f"""{SNIPPET_BEGIN}

@@ -25,6 +25,19 @@ def test_snapshot_truncates_to_budget(repo):
     assert len(snap.diff) == 200
 
 
+def test_secret_looking_untracked_files_are_listed_without_contents(repo):
+    (repo / ".env").write_text("OPENAI_API_KEY=super-secret-value\n")
+    (repo / "server.key").write_text("-----BEGIN PRIVATE KEY-----\nsecret-value\n")
+    (repo / "notes.txt").write_text("nothing sensitive\n")
+
+    snap = snapshot(repo, 60_000)
+
+    assert snap.untracked[".env"] == "(skipped: looks like a secrets file)"
+    assert snap.untracked["server.key"] == "(skipped: looks like a secrets file)"
+    assert "super-secret-value" not in str(snap.untracked)
+    assert snap.untracked["notes.txt"] == "nothing sensitive\n"
+
+
 def test_non_git_directory(tmp_path):
     assert snapshot(tmp_path, 100).is_git is False
 

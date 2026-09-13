@@ -44,7 +44,7 @@ The diff and the session digest are each capped at 60,000 characters, and common
 
 ## Install
 
-Tap In requires Python 3.13+, [uv](https://docs.astral.sh/uv/), and Node.js (for `npx continues`).
+Tap In requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and Node.js (for `npx continues`).
 
 ```sh
 uv tool install --editable .
@@ -184,6 +184,8 @@ Tap In is local-only. Handoffs are written to your repository's `.tapin/` folder
 
 Before writing a handoff, Tap In redacts common secret formats: Anthropic and OpenAI API keys, GitHub tokens, AWS access key IDs, Google API keys, Slack tokens and bearer headers. That is a safety net, not a guarantee.
 
+New untracked files are copied into the handoff, except those whose names look like secrets (`.env`, `*.pem`, `*.key`, `id_rsa*`, `credentials.json`, `.netrc`, `*.tfvars` and similar), which are listed without their contents.
+
 A handoff can still contain proprietary code, file paths, command output and anything said in the session. Don't share one without reading it. Handoffs are never deleted automatically; remove `.tapin/handoffs/` when you no longer need them.
 
 ## Configuration
@@ -200,7 +202,7 @@ command = ["/Applications/ChatGPT.app/Contents/Resources/codex"]
 
 | Key | Default | Controls |
 |---|---|---|
-| `handoff_ttl_hours` | `12` | How long an unclaimed handoff is offered to new sessions |
+| `handoff_ttl_hours` | `12` | How long an unclaimed handoff is offered to new sessions, capped at 7 days |
 | `limit_errors` | `["rate_limit"]` | Claude Code `StopFailure` errors that trigger capture |
 | `limit_message_pattern` | usage/rate limit, quota, 429 | Which Cursor error messages count as a limit |
 | `diff_max_chars` / `digest_max_chars` | `60000` | Size caps for the workspace diff and session digest |

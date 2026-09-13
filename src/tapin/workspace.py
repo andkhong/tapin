@@ -2,14 +2,31 @@
 
 from __future__ import annotations
 
+import fnmatch
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tapin.store import DIR_NAME
-
+DIR_NAME = ".tapin"
 UNTRACKED_FILE_MAX_BYTES = 20_000
 EXCLUDE_TAPIN = f":(exclude){DIR_NAME}"
+SECRET_NAMES = (
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "id_rsa*",
+    "id_ed25519*",
+    "id_ecdsa*",
+    "credentials.json",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    "*.tfvars",
+)
+SECRET_PLACEHOLDER = "(skipped: looks like a secrets file)"
 
 
 def _git(cwd: Path, *args: str) -> str | None:
@@ -23,6 +40,15 @@ def _git(cwd: Path, *args: str) -> str | None:
 def find_root(cwd: Path) -> Path:
     top = _git(cwd, "rev-parse", "--show-toplevel")
     return Path(top.strip()) if top else cwd.resolve()
+
+
+def tapin_tracked(root: Path) -> bool:
+    """True when .tapin/ is committed: a clone would otherwise hand the next agent a stranger's handoff."""
+    return bool(_git(root, "ls-files", "-z", "--", DIR_NAME))
+
+
+def looks_secret(name: str) -> bool:
+    return any(fnmatch.fnmatch(name, pattern) for pattern in SECRET_NAMES)
 
 
 def ensure_excluded(root: Path) -> None:
@@ -78,6 +104,9 @@ def snapshot(root: Path, max_chars: int) -> Snapshot:
     listing = _git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", ".", EXCLUDE_TAPIN) or ""
     for rel in filter(None, listing.split("\0")):
         path = root / rel
+        if looks_secret(path.name):
+            snap.untracked[rel] = SECRET_PLACEHOLDER
+            continue
         try:
             if path.stat().st_size > UNTRACKED_FILE_MAX_BYTES:
                 snap.untracked[rel] = f"(skipped: larger than {UNTRACKED_FILE_MAX_BYTES} bytes)"

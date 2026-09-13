@@ -55,7 +55,14 @@ class JournalReader:
             lines = Path(ref.path).read_text().splitlines()
         except OSError as exc:
             raise ReaderError(f"journal unreadable: {exc}") from exc
-        entries = [json.loads(line) for line in lines if line.strip()]
+        entries, skipped = [], 0
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                skipped += 1
 
         blocks: list[str] = []
         used = 0
@@ -68,10 +75,11 @@ class JournalReader:
             used += len(block)
         blocks.reverse()
 
+        counts = f"{len(entries)} events" + (f", {skipped} unreadable line(s) skipped" if skipped else "")
         header = [
             "# Session Handoff Context",
             "",
-            f"Recorded by Tap In hooks for {ref.agent} session `{ref.session_id}` ({len(entries)} events).",
+            f"Recorded by Tap In hooks for {ref.agent} session `{ref.session_id}` ({counts}).",
             "",
             "## Recent Activity",
             "",

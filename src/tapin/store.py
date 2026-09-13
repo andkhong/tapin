@@ -8,12 +8,14 @@ import os
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-DIR_NAME = ".tapin"
+from tapin.workspace import DIR_NAME, tapin_tracked
+
+MAX_TTL_HOURS = 24 * 7
 
 
 def utcnow() -> datetime:
@@ -47,8 +49,22 @@ class Pending:
     expires_at: str
     claimed_by: dict[str, Any] | None = None
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Pending:
+        """Other agents write this file too (see docs/PROTOCOL.md), so ignore fields we don't know."""
+        known = {field.name for field in fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in known})
+
+    def expires(self) -> datetime:
+        """`expires_at` is only as trustworthy as whoever wrote the file, so cap it at MAX_TTL_HOURS."""
+        return min(parse_iso(self.expires_at), parse_iso(self.created_at) + timedelta(hours=MAX_TTL_HOURS))
+
     def expired(self, now: datetime | None = None) -> bool:
-        return (now or utcnow()) >= parse_iso(self.expires_at)
+        return (now or utcnow()) >= self.expires()
+
+    def in_window(self, now: datetime | None = None) -> bool:
+        now = now or utcnow()
+        return parse_iso(self.created_at) <= now < self.expires()
 
 
 class Store:
@@ -109,11 +125,13 @@ class Store:
     def pending(self) -> Pending | None:
         if not self.pending_path.exists():
             return None
-        return Pending(**json.loads(self.pending_path.read_text()))
+        return Pending.from_dict(json.loads(self.pending_path.read_text()))
 
     def claimable(self) -> Pending | None:
         pending = self.pending()
-        if pending is None or pending.claimed_by or pending.expired():
+        if pending is None or pending.claimed_by or not pending.in_window():
+            return None
+        if tapin_tracked(self.workspace):
             return None
         return pending
 
@@ -148,6 +166,9 @@ class Store:
 
     def read_meta(self, handoff_id: str) -> dict[str, Any]:
         return json.loads((self.handoffs_dir / handoff_id / "meta.json").read_text())
+
+    def write_meta(self, handoff_id: str, meta: dict[str, Any]) -> None:
+        _write_atomic(self.handoffs_dir / handoff_id / "meta.json", json.dumps(meta, indent=2))
 
     def list_handoffs(self) -> list[dict[str, Any]]:
         if not self.handoffs_dir.exists():
